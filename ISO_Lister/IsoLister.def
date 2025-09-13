@@ -1,0 +1,7 @@
+LIBRARY "IsoLister"
+EXPORTS
+    ListLoad
+    ListLoadW
+    ListGetDetectString
+    ListCloseWindow
+    ListSetDefaultParams
