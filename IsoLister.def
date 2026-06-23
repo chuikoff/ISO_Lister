@@ -1,0 +1,8 @@
+LIBRARY "IsoLister.wlx64"
+EXPORTS
+    ListLoad
+    ListLoadW
+    ListGetDetectString
+    ListCloseWindow
+    ListSetDefaultParams
+    ListSendCommand

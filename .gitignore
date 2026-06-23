@@ -1,0 +1,16 @@
+.vs/
+x64/
+IsoLister/x64/
+*.obj
+*.pdb
+*.ilk
+*.exp
+*.lib
+*.wlx64
+*.dll
+*.aps
+*.user
+*.bak
+version_auto.h
+IsoLister.log
+test/out/
