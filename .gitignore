@@ -9,6 +9,7 @@ IsoLister/x64/
 *.wlx64
 *.dll
 *.aps
+*.res
 *.user
 *.bak
 version_auto.h
