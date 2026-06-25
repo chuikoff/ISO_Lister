@@ -1089,6 +1089,16 @@ static std::wstring udf_dname(const uint8_t* p, int len) {
     uint8_t comp = p[0];
     std::wstring out;
     if (comp == 8 || comp == 16) {
+        bool ucs2Be = false;
+        for (int i = 1; i + 1 < len; i += 2) {
+            if (p[i] == 0 && p[i + 1] != 0) { ucs2Be = true; break; }
+        }
+        if (comp == 8 && !ucs2Be) {
+            for (int i = 1; i < len; i++) {
+                if (p[i]) out.push_back((wchar_t)p[i]);
+            }
+            if (!out.empty()) return out;
+        }
         for (int i = 1; i + 1 < len; i += 2) {
             wchar_t ch = (wchar_t)((p[i] << 8) | p[i + 1]);
             if (ch) out.push_back(ch);
