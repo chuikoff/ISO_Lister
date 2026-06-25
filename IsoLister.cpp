@@ -120,6 +120,10 @@ static const int TAB_BOOT_7 = 98;   // LBA
 static const int TAB_FILE_PATH = 4;
 static const int TAB_FILE_SIZE = 58;
 static const int TAB_FILE_TYPE = 72;
+static const int TAB_WIN_IDX = 4;
+static const int TAB_WIN_NAME = 10;
+static const int TAB_WIN_EDITION = 44;
+static const int TAB_WIN_VER = 64;
 
 // -----------------------------------------------------------------------------
 // Утилиты строк и кодировок
@@ -205,6 +209,9 @@ static uint32_t rd_le32(const uint8_t* p) {
 static uint16_t rd_le16(const uint8_t* p) {
     return (uint16_t)p[0] | ((uint16_t)p[1] << 8);
 }
+static uint64_t rd_le64(const uint8_t* p) {
+    return (uint64_t)rd_le32(p) | ((uint64_t)rd_le32(p + 4) << 32);
+}
 
 // -----------------------------------------------------------------------------
 // Дата/время ISO9660 (17 байт: YYYYMMDDHHMMSSccTZ)
@@ -236,6 +243,9 @@ struct IsoSummary {
     // PVD
     bool   hasPVD = false;
     std::wstring volId, sysId, appId;
+    std::wstring volumeSetId, publisherId, dataPreparerId;
+    uint16_t volumeSetSize = 0;
+    uint16_t volumeSequenceNumber = 0;
     uint32_t volBlocks = 0;
     uint16_t logicalBlockSize = 0;
     uint32_t pathTableL = 0, pathTableM = 0, pathTableSize = 0;
@@ -311,8 +321,8 @@ static void parse_pvd(const uint8_t* vdbuf, IsoSummary& out) {
 
     uint32_t volSpaceLE = rd_le32(vdbuf + o); o += 4; o += 4;
     o += 32; // unused
-    o += 2 + 2; // volume_set_size
-    o += 2 + 2; // volume_sequence_number
+    out.volumeSetSize = rd_le16(vdbuf + o); o += 2; o += 2;
+    out.volumeSequenceNumber = rd_le16(vdbuf + o); o += 2; o += 2;
     uint16_t lbSize = rd_le16(vdbuf + o); o += 2; o += 2;
     uint32_t ptSize = rd_le32(vdbuf + o); o += 4; o += 4;
     uint32_t typeL = rd_le32(vdbuf + o); o += 4;
@@ -325,7 +335,14 @@ static void parse_pvd(const uint8_t* vdbuf, IsoSummary& out) {
     uint32_t rdrSize = rd_le32(rdr + 10);
     o += 34;
 
-    o += 128 /*volume_set_id*/ + 128 /*publisher_id*/ + 128 /*data_preparer_id*/;
+    {
+        std::string volSet((const char*)vdbuf + o, 128); o += 128;
+        std::string pub((const char*)vdbuf + o, 128); o += 128;
+        std::string prep((const char*)vdbuf + o, 128); o += 128;
+        out.volumeSetId = ATrimRight(volSet);
+        out.publisherId = ATrimRight(pub);
+        out.dataPreparerId = ATrimRight(prep);
+    }
     std::string appId((const char*)vdbuf + o, 128); o += 128;
     o += 37 /*copyright*/ + 37 /*abstract*/ + 37 /*bibliographic*/;
 
@@ -584,6 +601,379 @@ static void read_directory(FileReader& fr, uint32_t lba, uint32_t size, bool jol
     }
 }
 
+// -----------------------------------------------------------------------------
+// Чтение файлов из ISO и разбор Windows WIM/ESD
+// -----------------------------------------------------------------------------
+struct IsoFileRef {
+    std::wstring path;
+    uint32_t lba = 0;
+    uint32_t size = 0;
+};
+
+struct WimImageInfo {
+    int index = 0;
+    std::wstring name;
+    std::wstring displayName;
+    std::wstring description;
+    std::wstring editionId;
+    std::wstring arch;
+    std::wstring version;
+    std::wstring language;
+};
+
+struct WindowsInfo {
+    bool detected = false;
+    bool isInstallMedia = false;
+    std::wstring imageType;
+    std::wstring productVersion;
+    std::wstring buildNumber;
+    std::wstring channel;
+    std::wstring architecture;
+    std::wstring defaultLanguage;
+    std::wstring installImagePath;
+    uint64_t installImageSize = 0;
+    std::wstring bootImagePath;
+    uint64_t bootImageSize = 0;
+    std::vector<std::wstring> eiCfgEditions;
+    std::vector<WimImageInfo> editions;
+};
+
+static bool read_iso_file_bytes(FileReader& fr, uint32_t lba, uint32_t fileSize,
+    uint64_t offsetInFile, void* buf, DWORD size)
+{
+    if (size == 0) return false;
+    if (offsetInFile >= fileSize) return false;
+    if (offsetInFile + size > fileSize)
+        size = (DWORD)(fileSize - offsetInFile);
+    uint64_t abs = (uint64_t)lba * g_sectorSize + offsetInFile;
+    return fr.read_at(abs, buf, size);
+}
+
+static std::wstring xml_get_attr(const std::wstring& tag, const wchar_t* name) {
+    std::wstring key = std::wstring(name) + L"=\"";
+    size_t p = tag.find(key);
+    if (p == std::wstring::npos) return L"";
+    p += key.size();
+    size_t e = tag.find(L'"', p);
+    if (e == std::wstring::npos) return L"";
+    return tag.substr(p, e - p);
+}
+
+static std::wstring xml_get_elem_text(const std::wstring& block, const wchar_t* elem) {
+    std::wstring open = std::wstring(L"<") + elem;
+    std::wstring close = std::wstring(L"</") + elem + L">";
+    size_t p = block.find(open);
+    if (p == std::wstring::npos) return L"";
+    p = block.find(L">", p);
+    if (p == std::wstring::npos) return L"";
+    p++;
+    size_t e = block.find(close, p);
+    if (e == std::wstring::npos) return L"";
+    std::wstring val = block.substr(p, e - p);
+    size_t lt = val.find(L'<');
+    if (lt != std::wstring::npos) val = val.substr(0, lt);
+    return val;
+}
+
+static std::wstring wim_arch_name(const std::wstring& archNum) {
+    if (archNum == L"9") return L"x64";
+    if (archNum == L"0") return L"x86";
+    if (archNum == L"12") return L"ARM64";
+    return archNum;
+}
+
+static void parse_wim_xml_images(const std::wstring& xml, std::vector<WimImageInfo>& out) {
+    size_t pos = 0;
+    while (pos < xml.size()) {
+        size_t imgStart = xml.find(L"<IMAGE ", pos);
+        if (imgStart == std::wstring::npos) break;
+
+        size_t imgEnd = xml.find(L"</IMAGE>", imgStart);
+        std::wstring block;
+        if (imgEnd != std::wstring::npos) {
+            block = xml.substr(imgStart, imgEnd + 8 - imgStart);
+            pos = imgEnd + 8;
+        }
+        else {
+            size_t gt = xml.find(L">", imgStart);
+            if (gt == std::wstring::npos) break;
+            block = xml.substr(imgStart, gt - imgStart + 1);
+            pos = gt + 1;
+        }
+
+        size_t gt = block.find(L">");
+        if (gt == std::wstring::npos) continue;
+        std::wstring openTag = block.substr(0, gt + 1);
+
+        WimImageInfo wi{};
+        wi.index = _wtoi(xml_get_attr(openTag, L"INDEX").c_str());
+        wi.name = xml_get_attr(openTag, L"NAME");
+        wi.description = xml_get_attr(openTag, L"DESCRIPTION");
+        wi.displayName = xml_get_attr(openTag, L"DISPLAYNAME");
+        if (wi.displayName.empty()) wi.displayName = wi.name;
+        if (wi.displayName.empty()) wi.displayName = wi.description;
+
+        size_t verPos = block.find(L"<VERSION");
+        if (verPos != std::wstring::npos) {
+            size_t verEnd = block.find(L">", verPos);
+            if (verEnd != std::wstring::npos) {
+                std::wstring verTag = block.substr(verPos, verEnd - verPos + 1);
+                std::wstring major = xml_get_attr(verTag, L"MAJOR");
+                std::wstring minor = xml_get_attr(verTag, L"MINOR");
+                std::wstring build = xml_get_attr(verTag, L"BUILD");
+                std::wstring sp = xml_get_attr(verTag, L"SPBUILD");
+                if (!major.empty()) {
+                    wi.version = major + L"." + minor + L"." + build;
+                    if (!sp.empty() && sp != L"0") wi.version += L"." + sp;
+                }
+            }
+        }
+
+        wi.editionId = xml_get_elem_text(block, L"EDITIONID");
+        if (wi.editionId.empty()) wi.editionId = xml_get_attr(block, L"EDITIONID");
+
+        std::wstring archNum = xml_get_attr(block, L"ARCH");
+        wi.arch = wim_arch_name(archNum);
+
+        wi.language = xml_get_elem_text(block, L"LANGUAGE");
+        if (wi.language.empty()) {
+            size_t langPos = block.find(L"<LANGUAGES>");
+            if (langPos != std::wstring::npos) {
+                size_t langEnd = block.find(L"</LANGUAGES>", langPos);
+                if (langEnd != std::wstring::npos) {
+                    std::wstring langs = block.substr(langPos, langEnd - langPos);
+                    wi.language = xml_get_elem_text(langs, L"LANGUAGE");
+                }
+            }
+        }
+
+        if (!wi.displayName.empty() || !wi.name.empty())
+            out.push_back(std::move(wi));
+    }
+}
+
+static bool wim_bytes_to_xml(const uint8_t* data, size_t len, std::wstring& xmlOut) {
+    if (len < 4) return false;
+    if (data[0] == 0xFF && data[1] == 0xFE) {
+        size_t chars = (len - 2) / 2;
+        xmlOut.assign(chars, L'\0');
+        memcpy(&xmlOut[0], data + 2, chars * sizeof(wchar_t));
+        return xmlOut.find(L"<IMAGE ") != std::wstring::npos || xmlOut.find(L"<WIM") != std::wstring::npos;
+    }
+    if (data[0] == '<' && data[1] == '?') {
+        xmlOut.assign((const wchar_t*)data, len / sizeof(wchar_t));
+        return true;
+    }
+    size_t chars = len / 2;
+    xmlOut.assign(chars, L'\0');
+    memcpy(&xmlOut[0], data, chars * sizeof(wchar_t));
+    return xmlOut.find(L"<IMAGE ") != std::wstring::npos || xmlOut.find(L"<WIM") != std::wstring::npos;
+}
+
+static bool parse_wim_xml_from_iso(FileReader& fr, uint32_t lba, uint32_t fileSize, std::vector<WimImageInfo>& out) {
+    const size_t WIM_HDR = 208;
+    uint8_t hdr[WIM_HDR]{};
+    if (!read_iso_file_bytes(fr, lba, fileSize, 0, hdr, (DWORD)WIM_HDR)) return false;
+
+    bool isWim = !memcmp(hdr, "MSWIM", 5) || !memcmp(hdr, "WIM", 3);
+    std::wstring xml;
+
+    if (isWim) {
+        uint64_t xmlOff = rd_le64(hdr + 80);
+        uint64_t xmlLen = rd_le64(hdr + 88);
+        if (xmlLen > 0 && xmlLen <= 32 * 1024 * 1024 && xmlOff + xmlLen <= fileSize) {
+            std::vector<uint8_t> xmlBuf((size_t)xmlLen);
+            if (read_iso_file_bytes(fr, lba, fileSize, xmlOff, xmlBuf.data(), (DWORD)xmlLen)) {
+                if (wim_bytes_to_xml(xmlBuf.data(), xmlBuf.size(), xml)) {
+                    parse_wim_xml_images(xml, out);
+                    if (!out.empty()) return true;
+                }
+            }
+        }
+    }
+
+    const size_t SCAN = (size_t)std::min<uint32_t>(fileSize, 8u * 1024u * 1024u);
+    std::vector<uint8_t> scanBuf(SCAN);
+    if (!read_iso_file_bytes(fr, lba, fileSize, 0, scanBuf.data(), (DWORD)SCAN)) return false;
+
+    const char* needle = "<IMAGE ";
+    const char* wneedle = "<WIM";
+    for (size_t i = 0; i + 7 < SCAN; ++i) {
+        if (memcmp(scanBuf.data() + i, needle, 7) == 0 || memcmp(scanBuf.data() + i, wneedle, 4) == 0) {
+            size_t chunk = (size_t)std::min<uint64_t>(fileSize - i, 4 * 1024 * 1024);
+            std::vector<uint8_t> xmlBuf(chunk);
+            if (!read_iso_file_bytes(fr, lba, fileSize, i, xmlBuf.data(), (DWORD)chunk)) continue;
+            if (wim_bytes_to_xml(xmlBuf.data(), xmlBuf.size(), xml)) {
+                parse_wim_xml_images(xml, out);
+                if (!out.empty()) return true;
+            }
+            if (xmlBuf.size() >= 2) {
+                std::string ascii((const char*)xmlBuf.data(), std::min(xmlBuf.size(), (size_t)chunk));
+                size_t ap = ascii.find("<IMAGE ");
+                if (ap != std::string::npos) {
+                    int wlen = MultiByteToWideChar(CP_UTF8, 0, ascii.c_str() + (int)ap, -1, nullptr, 0);
+                    if (wlen > 0) {
+                        std::wstring wx(wlen, L'\0');
+                        MultiByteToWideChar(CP_UTF8, 0, ascii.c_str() + (int)ap, -1, &wx[0], wlen);
+                        parse_wim_xml_images(wx, out);
+                        if (!out.empty()) return true;
+                    }
+                }
+            }
+            break;
+        }
+    }
+    return !out.empty();
+}
+
+static void parse_ei_cfg_text(const std::string& text, WindowsInfo& win) {
+    std::string section;
+    std::istringstream ss(text);
+    std::string line;
+    while (std::getline(ss, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+        if (line.empty() || line[0] == ';' || line[0] == '#') continue;
+        if (line.front() == '[' && line.back() == ']') {
+            section = line;
+            continue;
+        }
+        std::string val = line;
+        size_t eq = val.find('=');
+        if (eq != std::string::npos) val = val.substr(eq + 1);
+        std::wstring wval = ATrimRight(val);
+        if (wval.empty()) continue;
+
+        std::wstring sec;
+        if (!section.empty()) {
+            int slen = MultiByteToWideChar(CP_ACP, 0, section.c_str(), -1, nullptr, 0);
+            sec.assign(slen, L'\0');
+            MultiByteToWideChar(CP_ACP, 0, section.c_str(), -1, &sec[0], slen);
+            if (!sec.empty() && sec.back() == L'\0') sec.pop_back();
+        }
+
+        if (sec.find(L"Channel") != std::wstring::npos || val.find("_Channel") != std::string::npos)
+            win.channel = wval;
+        if (sec.find(L"EditionID") != std::wstring::npos)
+            win.eiCfgEditions.push_back(wval);
+        if (sec.find(L"VL") != std::wstring::npos && win.channel.empty())
+            win.channel = L"Volume";
+    }
+}
+
+static void enrich_windows_from_metadata(const IsoSummary& sum, WindowsInfo& win) {
+    std::wstring v = ToLower(sum.volId + L" " + sum.volumeSetId + L" " + sum.appId);
+    if (win.productVersion.empty()) {
+        if (v.find(L"win11") != std::wstring::npos || v.find(L"windows11") != std::wstring::npos)
+            win.productVersion = L"Windows 11";
+        else if (v.find(L"win10") != std::wstring::npos || v.find(L"windows10") != std::wstring::npos)
+            win.productVersion = L"Windows 10";
+        else if (v.find(L"win8.1") != std::wstring::npos) win.productVersion = L"Windows 8.1";
+        else if (v.find(L"win8") != std::wstring::npos) win.productVersion = L"Windows 8";
+        else if (v.find(L"win7") != std::wstring::npos || v.find(L"windows7") != std::wstring::npos)
+            win.productVersion = L"Windows 7";
+        else if (v.find(L"server") != std::wstring::npos) win.productVersion = L"Windows Server";
+    }
+    if (v.find(L"sp1") != std::wstring::npos && win.productVersion.find(L"SP1") == std::wstring::npos)
+        win.productVersion += L" SP1";
+    if (v.find(L"x64") != std::wstring::npos || v.find(L"amd64") != std::wstring::npos)
+        win.architecture = L"x64";
+    else if (v.find(L"x86") != std::wstring::npos) win.architecture = L"x86";
+    if (v.find(L"ru") != std::wstring::npos || v.find(L"rus") != std::wstring::npos)
+        win.defaultLanguage = L"ru-RU";
+    else if (v.find(L"en") != std::wstring::npos) win.defaultLanguage = L"en-US";
+    if (win.imageType.empty() && !win.productVersion.empty())
+        win.imageType = L"Windows (по метаданным ISO)";
+}
+
+static std::wstring guess_windows_product_name(const std::vector<WimImageInfo>& editions) {
+    for (const auto& e : editions) {
+        std::wstring n = ToLower(e.displayName.empty() ? e.name : e.displayName);
+        if (n.find(L"windows 11") != std::wstring::npos) return L"Windows 11";
+        if (n.find(L"windows 10") != std::wstring::npos) return L"Windows 10";
+        if (n.find(L"windows 8.1") != std::wstring::npos) return L"Windows 8.1";
+        if (n.find(L"windows 8") != std::wstring::npos) return L"Windows 8";
+        if (n.find(L"windows 7") != std::wstring::npos) return L"Windows 7";
+        if (n.find(L"windows server 2025") != std::wstring::npos) return L"Windows Server 2025";
+        if (n.find(L"windows server 2022") != std::wstring::npos) return L"Windows Server 2022";
+        if (n.find(L"windows server 2019") != std::wstring::npos) return L"Windows Server 2019";
+        if (n.find(L"windows server 2016") != std::wstring::npos) return L"Windows Server 2016";
+        if (n.find(L"windows pe") != std::wstring::npos) return L"Windows PE";
+    }
+    return L"";
+}
+
+static bool path_iequals_suffix(const std::wstring& path, const std::wstring& suffix) {
+    if (path.size() < suffix.size()) return false;
+    return ToLower(path.substr(path.size() - suffix.size())) == ToLower(suffix);
+}
+
+struct WimDiscovery {
+    uint64_t offset = 0;
+    uint32_t imageCount = 0;
+    uint64_t estimatedSize = 0;
+};
+
+static bool wim_header_looks_valid(const uint8_t* hdr) {
+    if (memcmp(hdr, "MSWIM", 5) != 0) return false;
+    if (rd_le32(hdr + 8) != 208) return false;
+    uint32_t imgCount = rd_le32(hdr + 0x1C);
+    if (imgCount == 0 || imgCount > 40) return false;
+    uint64_t xmlOff = rd_le64(hdr + 80);
+    uint64_t xmlLen = rd_le64(hdr + 88);
+    if (xmlLen < 64 || xmlLen > 32 * 1024 * 1024) return false;
+    if (xmlOff < 208 || xmlOff > 512 * 1024 * 1024ULL) return false;
+    return true;
+}
+
+static void discover_wim_by_signature_scan(FileReader& fr, uint64_t isoSize, std::vector<WimDiscovery>& out) {
+    const uint64_t chunk = 32 * 1024 * 1024;
+    const size_t step = 512;
+    std::vector<uint8_t> buf((size_t)chunk + 256);
+
+    for (uint64_t base = 34ULL * g_sectorSize; base < isoSize; base += chunk) {
+        uint64_t toRead = std::min<uint64_t>(chunk + 256, isoSize - base);
+        if (!fr.read_at(base, buf.data(), (DWORD)toRead)) break;
+
+        for (size_t i = 0; i + 208 < toRead; i += step) {
+            const uint8_t* hdr = buf.data() + i;
+            if (memcmp(hdr, "MSWIM", 5) != 0) continue;
+            if (!wim_header_looks_valid(hdr)) continue;
+
+            uint64_t start = base + i;
+            bool dup = false;
+            for (const auto& d : out) {
+                uint64_t delta = start > d.offset ? start - d.offset : d.offset - start;
+                if (delta < 4096) { dup = true; break; }
+            }
+            if (dup) continue;
+
+            WimDiscovery wd{};
+            wd.offset = start;
+            wd.imageCount = rd_le32(hdr + 0x1C);
+            wd.estimatedSize = chunk;
+            out.push_back(wd);
+        }
+    }
+}
+
+static bool parse_wim_at_offset(FileReader& fr, uint64_t offset, uint64_t /*maxSize*/, std::vector<WimImageInfo>& out) {
+    const size_t WIM_HDR = 208;
+    uint8_t hdr[WIM_HDR]{};
+    if (!fr.read_at(offset, hdr, (DWORD)WIM_HDR)) return false;
+    if (!wim_header_looks_valid(hdr)) return false;
+
+    uint64_t xmlOff = rd_le64(hdr + 80);
+    uint64_t xmlLen = rd_le64(hdr + 88);
+    if (offset + xmlOff + xmlLen > fr.size_bytes()) return false;
+
+    std::vector<uint8_t> xmlBuf((size_t)xmlLen);
+    if (!fr.read_at(offset + xmlOff, xmlBuf.data(), (DWORD)xmlLen)) return false;
+    std::wstring xml;
+    if (!wim_bytes_to_xml(xmlBuf.data(), xmlBuf.size(), xml)) return false;
+    parse_wim_xml_images(xml, out);
+    return !out.empty();
+}
+
 // BFS-скан по дереву
 struct FileListItem {
     std::wstring path;
@@ -603,6 +993,8 @@ struct ScanResult {
     bool foundGenericEFI = false;
     std::vector<std::wstring> configHits;
     std::vector<FileListItem> fileList;
+    std::vector<IsoFileRef> winFiles;
+    std::vector<FileListItem> largestFiles;
     int totalFiles = 0;
     int totalDirs = 0;
 };
@@ -623,7 +1015,31 @@ static ScanResult bfs_scan(FileReader& fr,
         };
 
     const std::vector<std::wstring> cfgTargets = {
-        L"preseed.cfg", L"autounattend.xml", L"unattend.xml", L"ks.cfg", L"loader.conf"
+        L"preseed.cfg", L"autounattend.xml", L"unattend.xml", L"ks.cfg", L"loader.conf",
+        L"ei.cfg", L"lang.ini", L"idwbfind.xml", L"product.ini"
+    };
+
+    auto track_windows_file = [&](const std::wstring& fullPath, const DirEntry& e) {
+        static const wchar_t* kWinSuffixes[] = {
+            L"/sources/install.wim", L"/sources/install.esd", L"/sources/boot.wim",
+            L"/sources/ei.cfg", L"/setup.exe", L"/bootmgr", L"/bootmgr.efi",
+            L"/sources/bootmgr", L"/sources/bootmgr.efi", L"/sources/install.wim.xml"
+        };
+        for (const wchar_t* suf : kWinSuffixes) {
+            if (path_iequals_suffix(fullPath, suf)) {
+                res.winFiles.push_back({ fullPath, e.lba, e.size });
+                break;
+            }
+        }
+    };
+
+    auto track_largest = [&](const std::wstring& fullPath, const DirEntry& e) {
+        if (e.isDir) return;
+        FileListItem item{ fullPath, e.size, false };
+        res.largestFiles.push_back(item);
+        std::sort(res.largestFiles.begin(), res.largestFiles.end(),
+            [](const FileListItem& a, const FileListItem& b) { return a.size > b.size; });
+        if (res.largestFiles.size() > 15) res.largestFiles.resize(15);
     };
 
     while (!q.empty() && nodes < maxNodes) {
@@ -651,6 +1067,8 @@ static ScanResult bfs_scan(FileReader& fr,
             else res.totalFiles++;
 
             if (!e.isDir) {
+                track_windows_file(fullPath, e);
+                track_largest(fullPath, e);
                 if (lower == L"isolinux.bin" || lower == L"ldlinux.c32" || lower == L"isolinux.cfg")
                     res.foundISOLINUX = true;
                 if (lower == L"menu.c32" || lower == L"vesamenu.c32" || lower == L"syslinux.cfg")
@@ -686,6 +1104,271 @@ static ScanResult bfs_scan(FileReader& fr,
     }
 
     return res;
+}
+
+// -----------------------------------------------------------------------------
+// UDF: обход каталогов (для ISO с UDF-разделом, где лежит install.wim)
+// -----------------------------------------------------------------------------
+static bool udf_tag_ok(const uint8_t* t) {
+    uint8_t cs = 0;
+    for (int i = 0; i < 16; i++) if (i != 4) cs = (uint8_t)(cs + t[i]);
+    return cs == t[4];
+}
+
+static std::wstring udf_dname(const uint8_t* p, int len) {
+    if (len <= 0) return L"";
+    uint8_t comp = p[0];
+    std::wstring out;
+    if (comp == 8) {
+        for (int i = 1; i + 1 < len; i += 2)
+            out.push_back((wchar_t)((p[i] << 8) | p[i + 1]));
+    }
+    else if (comp == 16) {
+        for (int i = 1; i < len; i++) out.push_back((wchar_t)p[i]);
+    }
+    else {
+        std::string a((const char*)p, len);
+        return ATrimRight(a);
+    }
+    return out;
+}
+
+static bool udf_read_short_ad(const uint8_t* p, uint32_t& lba, uint32_t& len) {
+    uint32_t lt = rd_le32(p);
+    len = lt & 0x3FFFFFFF;
+    lba = (uint32_t)rd_le32(p + 4);
+    return len > 0;
+}
+
+static void udf_scan_directory(FileReader& fr, uint32_t partBase, uint32_t dirLba, uint32_t dirLen,
+    const std::wstring& path, ScanResult& res, int depth, int maxDepth)
+{
+    if (depth > maxDepth || dirLen == 0) return;
+    size_t toRead = (size_t)std::min<uint32_t>(dirLen, 4 * 1024 * 1024);
+    std::vector<uint8_t> buf(toRead);
+    if (!fr.read_sector(partBase + dirLba, buf.data(), (DWORD)toRead)) return;
+
+    size_t off = 0;
+    while (off + 38 <= buf.size()) {
+        const uint8_t* d = buf.data() + off;
+        if (!udf_tag_ok(d)) break;
+        uint16_t tagId = rd_le16(d);
+        if (tagId != 257) break;
+        uint16_t crcLen = rd_le16(d + 10);
+        size_t descLen = ((size_t)crcLen + 3) & ~size_t(3);
+        if (descLen < 38 || off + descLen > buf.size()) break;
+
+        uint8_t fileChar = d[18];
+        uint8_t nameLen = d[19];
+        uint32_t fileLba = 0, fileLen = 0;
+        udf_read_short_ad(d + 20, fileLba, fileLen);
+        uint16_t iuLen = rd_le16(d + 36);
+        size_t nameOff = 38 + iuLen;
+        if (nameOff + nameLen > descLen) { off += descLen; continue; }
+
+        std::wstring name = udf_dname(d + nameOff, nameLen);
+        if (!name.empty() && name.back() == L';') {
+            size_t sc = name.find_last_of(L';');
+            if (sc != std::wstring::npos) name = name.substr(0, sc);
+        }
+
+        bool isDir = (fileChar & 0x02) != 0;
+        std::wstring full = path.empty() ? (L"/" + name) : (path + L"/" + name);
+
+        if (g_optShowFileList && (int)res.fileList.size() < g_optMaxFileList) {
+            FileListItem fl{ full, fileLen, isDir };
+            res.fileList.push_back(fl);
+        }
+        if (isDir) res.totalDirs++; else res.totalFiles++;
+
+        if (!isDir) {
+            static const wchar_t* kWinSuffixes[] = {
+                L"/sources/install.wim", L"/sources/install.esd", L"/sources/boot.wim",
+                L"/sources/ei.cfg", L"/setup.exe"
+            };
+            for (const wchar_t* suf : kWinSuffixes) {
+                if (path_iequals_suffix(full, suf)) {
+                    res.winFiles.push_back({ full, partBase + fileLba, fileLen });
+                    break;
+                }
+            }
+            if (fileLen > 0) {
+                FileListItem item{ full, fileLen, false };
+                res.largestFiles.push_back(item);
+                std::sort(res.largestFiles.begin(), res.largestFiles.end(),
+                    [](const FileListItem& a, const FileListItem& b) { return a.size > b.size; });
+                if (res.largestFiles.size() > 15) res.largestFiles.resize(15);
+            }
+        }
+        else if (depth < maxDepth && fileLba && name != L"." && name != L"..") {
+            udf_scan_directory(fr, partBase, fileLba, fileLen, full, res, depth + 1, maxDepth);
+        }
+
+        off += descLen;
+    }
+}
+
+static bool udf_locate_root(FileReader& fr, const IsoSummary& sum, uint32_t& partBase,
+    uint32_t& rootLba, uint32_t& rootLen)
+{
+    const int rootOffsets[] = { 400, 412, 456, 464 };
+    auto try_fsd_in_sector = [&](uint32_t s) -> bool {
+        uint8_t sec[2048]{};
+        if (!fr.read_sector(s, sec, g_sectorSize)) return false;
+        for (size_t base = 0; base + 480 <= g_sectorSize; base += 4) {
+            if (!udf_tag_ok(sec + base) || rd_le16(sec + base) != 256) continue;
+            for (int ro : rootOffsets) {
+                if (udf_read_short_ad(sec + base + ro, rootLba, rootLen) && rootLba && rootLen) {
+                    partBase = s;
+                    return true;
+                }
+            }
+        }
+        return false;
+    };
+
+    if (sum.udfPartitionStart && try_fsd_in_sector(sum.udfPartitionStart)) return true;
+    for (uint32_t s = 16; s < 512; ++s)
+        if (try_fsd_in_sector(s)) return true;
+    return false;
+}
+
+static void udf_scan_tree(FileReader& fr, const IsoSummary& sum, ScanResult& res, int maxDepth) {
+    if (!sum.hasUDF) return;
+    uint32_t partBase = 0, rootLba = 0, rootLen = 0;
+    if (!udf_locate_root(fr, sum, partBase, rootLba, rootLen)) return;
+    udf_scan_directory(fr, partBase, rootLba, rootLen, L"", res, 0, maxDepth);
+}
+
+static void analyze_windows_media(FileReader& fr, const ScanResult& scan, WindowsInfo& win, const IsoSummary& sum) {
+    const IsoFileRef* installWim = nullptr;
+    const IsoFileRef* installEsd = nullptr;
+    const IsoFileRef* bootWim = nullptr;
+    const IsoFileRef* eiCfg = nullptr;
+
+    for (const auto& f : scan.winFiles) {
+        std::wstring lp = ToLower(f.path);
+        if (lp.find(L"/sources/install.wim") != std::wstring::npos) installWim = &f;
+        else if (lp.find(L"/sources/install.esd") != std::wstring::npos) installEsd = &f;
+        else if (lp.find(L"/sources/boot.wim") != std::wstring::npos) bootWim = &f;
+        else if (lp.find(L"/sources/ei.cfg") != std::wstring::npos) eiCfg = &f;
+    }
+
+    const IsoFileRef* primary = installWim ? installWim : installEsd;
+
+    bool likelyMicrosoft = ToLower(sum.publisherId).find(L"microsoft") != std::wstring::npos
+        || ToLower(sum.volId).find(L"win") != std::wstring::npos
+        || ToLower(sum.appId).find(L"oscdimg") != std::wstring::npos
+        || sum.foundWinBootMgr || sum.biosBoot || sum.hasBootRecord;
+
+    if (!primary && !bootWim && scan.winFiles.empty() && !likelyMicrosoft) return;
+
+    win.detected = true;
+    if (primary) {
+        win.isInstallMedia = true;
+        win.imageType = installEsd && primary == installEsd ? L"Windows Setup (ESD)" : L"Windows Setup (WIM)";
+        win.installImagePath = primary->path;
+        win.installImageSize = primary->size;
+        parse_wim_xml_from_iso(fr, primary->lba, primary->size, win.editions);
+    }
+    else if (bootWim) {
+        win.imageType = L"Windows PE / Recovery";
+        win.bootImagePath = bootWim->path;
+        win.bootImageSize = bootWim->size;
+        parse_wim_xml_from_iso(fr, bootWim->lba, bootWim->size, win.editions);
+    }
+
+    if (bootWim) {
+        win.bootImagePath = bootWim->path;
+        win.bootImageSize = bootWim->size;
+    }
+
+    if (eiCfg && eiCfg->size > 0 && eiCfg->size < 1024 * 1024) {
+        std::vector<uint8_t> buf(eiCfg->size);
+        if (read_iso_file_bytes(fr, eiCfg->lba, eiCfg->size, 0, buf.data(), eiCfg->size)) {
+            std::string text((const char*)buf.data(), eiCfg->size);
+            parse_ei_cfg_text(text, win);
+        }
+    }
+
+    if (!win.editions.empty()) {
+        const WimImageInfo* best = &win.editions[0];
+        for (const auto& e : win.editions) {
+            std::wstring n = ToLower(e.displayName + e.name);
+            if (n.find(L"windows") != std::wstring::npos &&
+                n.find(L"setup") == std::wstring::npos &&
+                n.find(L"pe") == std::wstring::npos) {
+                best = &e;
+                break;
+            }
+        }
+        win.productVersion = guess_windows_product_name(win.editions);
+        if (!best->version.empty()) {
+            win.buildNumber = best->version;
+            if (win.productVersion.empty()) win.productVersion = L"Windows";
+            win.productVersion += L" (build " + best->version + L")";
+        }
+        if (!best->arch.empty()) win.architecture = best->arch;
+        if (!best->language.empty()) win.defaultLanguage = best->language;
+    }
+
+    if (win.architecture.empty()) {
+        for (const auto& f : scan.winFiles) {
+            std::wstring lp = ToLower(f.path);
+            if (lp.find(L"x64") != std::wstring::npos || lp.find(L"amd64") != std::wstring::npos)
+                win.architecture = L"x64";
+            else if (lp.find(L"x86") != std::wstring::npos || lp.find(L"i386") != std::wstring::npos)
+                win.architecture = L"x86";
+            else if (lp.find(L"arm64") != std::wstring::npos)
+                win.architecture = L"ARM64";
+        }
+        std::wstring volLow = ToLower(sum.volId);
+        if (volLow.find(L"x64") != std::wstring::npos) win.architecture = L"x64";
+        else if (volLow.find(L"x86") != std::wstring::npos) win.architecture = L"x86";
+    }
+
+    if (win.editions.empty() && likelyMicrosoft) {
+        std::vector<WimDiscovery> discovered;
+        discover_wim_by_signature_scan(fr, fr.size_bytes(), discovered);
+        std::vector<WimImageInfo> installEditions, bootEditions;
+        for (const auto& d : discovered) {
+            std::vector<WimImageInfo> imgs;
+            if (!parse_wim_at_offset(fr, d.offset, d.estimatedSize, imgs) || imgs.empty()) continue;
+            if (d.imageCount >= 4 || imgs.size() >= 4) {
+                if (imgs.size() > installEditions.size()) installEditions = std::move(imgs);
+            }
+            else if (bootEditions.empty() || imgs.size() > bootEditions.size()) {
+                bootEditions = std::move(imgs);
+            }
+            else if (installEditions.empty()) {
+                installEditions = std::move(imgs);
+            }
+        }
+        if (!installEditions.empty()) {
+            win.detected = true;
+            win.isInstallMedia = true;
+            win.imageType = L"Windows Setup (WIM, найден по сигнатуре)";
+            win.editions = std::move(installEditions);
+            win.installImagePath = L"(сканирование MSWIM)";
+            if (!win.editions.empty()) {
+                win.productVersion = guess_windows_product_name(win.editions);
+                for (const auto& e : win.editions) {
+                    if (!e.version.empty()) { win.buildNumber = e.version; break; }
+                }
+                if (!win.buildNumber.empty() && !win.productVersion.empty())
+                    win.productVersion += L" (build " + win.buildNumber + L")";
+            }
+        }
+        else if (!bootEditions.empty()) {
+            win.detected = true;
+            win.imageType = L"Windows PE / Recovery (WIM)";
+            win.editions = std::move(bootEditions);
+        }
+    }
+
+    enrich_windows_from_metadata(sum, win);
+    if (!win.productVersion.empty() && win.editions.empty() && sum.hasUDF && win.imageType.find(L"UDF") == std::wstring::npos)
+        win.imageType = L"Windows (метаданные ISO + UDF)";
 }
 
 // -----------------------------------------------------------------------------
@@ -1162,6 +1845,12 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
         else if (sum.foundGenericEFI || sum.uefiBoot) sum.bootLoader = L"EFI (generic) ✨";
     }
 
+    if (sum.hasUDF)
+        udf_scan_tree(fr, sum, scan, g_optDepth);
+
+    WindowsInfo winInfo{};
+    analyze_windows_media(fr, scan, winInfo, sum);
+
     std::wstring fsType = L"💿 ISO 9660";
     std::vector<std::wstring> ext;
     if (sum.joliet) ext.push_back(L"Joliet");
@@ -1185,8 +1874,15 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
         txt << L"System ID\t" << sum.sysId << L"\r\n";
         txt << L"Volume ID\t" << sum.volId << L"\r\n";
         txt << L"Application ID\t" << sum.appId << L"\r\n";
+        if (!sum.publisherId.empty()) txt << L"Publisher\t" << sum.publisherId << L"\r\n";
+        if (!sum.dataPreparerId.empty()) txt << L"Data Preparer\t" << sum.dataPreparerId << L"\r\n";
+        if (!sum.volumeSetId.empty()) txt << L"Volume Set ID\t" << sum.volumeSetId << L"\r\n";
+        if (sum.volumeSetSize) txt << L"Volume Set Size\t" << sum.volumeSetSize << L"\r\n";
+        if (sum.volumeSequenceNumber) txt << L"Volume Sequence\t" << sum.volumeSequenceNumber << L"\r\n";
         txt << L"Logical Block Size\t" << sum.logicalBlockSize << L"\r\n";
         txt << L"Volume Space\t" << sum.volBlocks << L" блоков (≈ " << (int)(MB + 0.5) << L" MB)\r\n";
+        txt << L"Path Table\tL " << sum.pathTableL << L", M " << sum.pathTableM
+            << L", size " << sum.pathTableSize << L" байт\r\n";
         txt << L"Root Dir\tLBA " << (sum.joliet ? sum.jolietRootLBA : sum.rootDirLBA)
             << L", size " << (sum.joliet ? sum.jolietRootSize : sum.rootDirSize) << L" байт\r\n";
         txt << L"🗓 Создан\t" << sum.created << L"\r\n";
@@ -1232,6 +1928,63 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
     else                               txt << L"Тип загрузки\t—\r\n";
 
     txt << L"Загрузчик\t" << (sum.bootLoader.empty() ? L"не обнаружен ❔" : sum.bootLoader) << L"\r\n";
+
+    if (winInfo.detected) {
+        txt << repeat(L'─', 90) << L"\r\n";
+        txt << L"🪟 Windows\t\r\n";
+        txt << L"Тип образа\t" << (winInfo.imageType.empty() ? L"Windows" : winInfo.imageType) << L"\r\n";
+        if (!winInfo.productVersion.empty())
+            txt << L"Версия\t" << winInfo.productVersion << L"\r\n";
+        if (!winInfo.buildNumber.empty())
+            txt << L"Сборка (build)\t" << winInfo.buildNumber << L"\r\n";
+        if (!winInfo.architecture.empty())
+            txt << L"Архитектура\t" << winInfo.architecture << L"\r\n";
+        if (!winInfo.channel.empty())
+            txt << L"Канал\t" << winInfo.channel << L"\r\n";
+        if (!winInfo.defaultLanguage.empty())
+            txt << L"Язык (основной)\t" << winInfo.defaultLanguage << L"\r\n";
+        if (winInfo.installImageSize)
+            txt << L"install.wim/esd\t" << winInfo.installImagePath << L" (" << FormatFileSize(winInfo.installImageSize) << L")\r\n";
+        if (winInfo.bootImageSize)
+            txt << L"boot.wim\t" << winInfo.bootImagePath << L" (" << FormatFileSize(winInfo.bootImageSize) << L")\r\n";
+        if (!winInfo.eiCfgEditions.empty()) {
+            txt << L"ei.cfg EditionID\t";
+            for (size_t i = 0; i < winInfo.eiCfgEditions.size(); ++i) {
+                txt << winInfo.eiCfgEditions[i];
+                if (i + 1 < winInfo.eiCfgEditions.size()) txt << L", ";
+            }
+            txt << L"\r\n";
+        }
+        if (!winInfo.editions.empty()) {
+            txt << L"Редакции (WIM)\t" << (int)winInfo.editions.size() << L" образ(ов)\r\n";
+            txt << L"#\tНазвание\tEditionID\tВерсия\r\n";
+            for (const auto& ed : winInfo.editions) {
+                txt << ed.index << L"\t"
+                    << (ed.displayName.empty() ? ed.name : ed.displayName) << L"\t"
+                    << (ed.editionId.empty() ? L"—" : ed.editionId) << L"\t"
+                    << (ed.version.empty() ? L"—" : ed.version);
+                if (!ed.arch.empty()) txt << L" (" << ed.arch << L")";
+                if (!ed.language.empty()) txt << L" [" << ed.language << L"]";
+                txt << L"\r\n";
+            }
+        }
+        else if (winInfo.isInstallMedia || winInfo.bootImageSize) {
+            txt << L"Редакции\tне удалось прочитать XML из WIM/ESD\r\n";
+        }
+        else if (sum.hasUDF && scan.totalFiles < 10) {
+            txt << L"Примечание\tфайлы в UDF-разделе; install.wim не найден в ISO9660-дереве\r\n";
+            txt << L"Подсказка\tдля AIO/кастомных ISO нужен полный UDF-обход (в работе)\r\n";
+        }
+    }
+
+    if (!scan.largestFiles.empty()) {
+        txt << repeat(L'─', 90) << L"\r\n";
+        txt << L"📦 Крупнейшие файлы\tтоп-" << (int)scan.largestFiles.size() << L"\r\n";
+        txt << L"Путь\tРазмер\tТип\r\n";
+        for (const auto& lf : scan.largestFiles) {
+            txt << lf.path << L"\t" << FormatFileSize(lf.size) << L"\tFILE\r\n";
+        }
+    }
 
     txt << repeat(L'─', 90) << L"\r\n";
     if (!sum.configHits.empty()) {
@@ -1319,7 +2072,8 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
         TAB_MAIN_1,
         TAB_BOOT_0, TAB_BOOT_1, TAB_BOOT_2, TAB_BOOT_3,
         TAB_BOOT_4, TAB_BOOT_5, TAB_BOOT_6, TAB_BOOT_7,
-        TAB_FILE_PATH, TAB_FILE_SIZE, TAB_FILE_TYPE
+        TAB_FILE_PATH, TAB_FILE_SIZE, TAB_FILE_TYPE,
+        TAB_WIN_IDX, TAB_WIN_NAME, TAB_WIN_EDITION, TAB_WIN_VER
     };
     RichSetTabs(hRE, tabs);
 
