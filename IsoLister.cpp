@@ -98,12 +98,13 @@ static const UINT VD_START_SECTOR = 16;
 static const size_t MAX_DIR_READ = 16 * 1024 * 1024;
 static UINT g_sectorSize = DEFAULT_SECTOR_SIZE;
 
-// Опции (по умолчанию)
+// Опции (по умолчанию — быстрый режим как Rufus)
 static int g_optDepth = 6;
 static int g_optMaxNodes = 40000;
 static int g_optShowBootEntries = 0;
-static int g_optShowFileList = 1;
+static int g_optShowFileList = 0;
 static int g_optMaxFileList = 1000;
+static int g_optFullScan = 0;
 
 // Таб‑позиции (в "знаках", конвертируем в twips по шрифту)
 static const int TAB_MAIN_1 = 26;   // поле → значение
@@ -607,7 +608,7 @@ static void read_directory(FileReader& fr, uint32_t lba, uint32_t size, bool jol
 struct IsoFileRef {
     std::wstring path;
     uint32_t lba = 0;
-    uint32_t size = 0;
+    uint64_t size = 0;
 };
 
 struct WimImageInfo {
@@ -638,7 +639,7 @@ struct WindowsInfo {
     std::vector<WimImageInfo> editions;
 };
 
-static bool read_iso_file_bytes(FileReader& fr, uint32_t lba, uint32_t fileSize,
+static bool read_iso_file_bytes(FileReader& fr, uint32_t lba, uint64_t fileSize,
     uint64_t offsetInFile, void* buf, DWORD size)
 {
     if (size == 0) return false;
@@ -707,35 +708,31 @@ static void parse_wim_xml_images(const std::wstring& xml, std::vector<WimImageIn
 
         WimImageInfo wi{};
         wi.index = _wtoi(xml_get_attr(openTag, L"INDEX").c_str());
-        wi.name = xml_get_attr(openTag, L"NAME");
-        wi.description = xml_get_attr(openTag, L"DESCRIPTION");
-        wi.displayName = xml_get_attr(openTag, L"DISPLAYNAME");
+        wi.name = xml_get_elem_text(block, L"NAME");
+        if (wi.name.empty()) wi.name = xml_get_attr(openTag, L"NAME");
+        wi.description = xml_get_elem_text(block, L"DESCRIPTION");
+        wi.displayName = xml_get_elem_text(block, L"DISPLAYNAME");
         if (wi.displayName.empty()) wi.displayName = wi.name;
         if (wi.displayName.empty()) wi.displayName = wi.description;
 
-        size_t verPos = block.find(L"<VERSION");
-        if (verPos != std::wstring::npos) {
-            size_t verEnd = block.find(L">", verPos);
-            if (verEnd != std::wstring::npos) {
-                std::wstring verTag = block.substr(verPos, verEnd - verPos + 1);
-                std::wstring major = xml_get_attr(verTag, L"MAJOR");
-                std::wstring minor = xml_get_attr(verTag, L"MINOR");
-                std::wstring build = xml_get_attr(verTag, L"BUILD");
-                std::wstring sp = xml_get_attr(verTag, L"SPBUILD");
-                if (!major.empty()) {
-                    wi.version = major + L"." + minor + L"." + build;
-                    if (!sp.empty() && sp != L"0") wi.version += L"." + sp;
-                }
-            }
+        std::wstring major = xml_get_elem_text(block, L"MAJOR");
+        std::wstring minor = xml_get_elem_text(block, L"MINOR");
+        std::wstring build = xml_get_elem_text(block, L"BUILD");
+        std::wstring sp = xml_get_elem_text(block, L"SPBUILD");
+        if (!major.empty()) {
+            wi.version = major + L"." + minor + L"." + build;
+            if (!sp.empty() && sp != L"0") wi.version += L"." + sp;
         }
 
         wi.editionId = xml_get_elem_text(block, L"EDITIONID");
         if (wi.editionId.empty()) wi.editionId = xml_get_attr(block, L"EDITIONID");
 
-        std::wstring archNum = xml_get_attr(block, L"ARCH");
+        std::wstring archNum = xml_get_elem_text(block, L"ARCH");
+        if (archNum.empty()) archNum = xml_get_attr(block, L"ARCH");
         wi.arch = wim_arch_name(archNum);
 
-        wi.language = xml_get_elem_text(block, L"LANGUAGE");
+        wi.language = xml_get_elem_text(block, L"DEFAULT");
+        if (wi.language.empty()) wi.language = xml_get_elem_text(block, L"LANGUAGE");
         if (wi.language.empty()) {
             size_t langPos = block.find(L"<LANGUAGES>");
             if (langPos != std::wstring::npos) {
@@ -747,7 +744,7 @@ static void parse_wim_xml_images(const std::wstring& xml, std::vector<WimImageIn
             }
         }
 
-        if (!wi.displayName.empty() || !wi.name.empty())
+        if (wi.index > 0 || !wi.displayName.empty() || !wi.editionId.empty())
             out.push_back(std::move(wi));
     }
 }
@@ -770,59 +767,31 @@ static bool wim_bytes_to_xml(const uint8_t* data, size_t len, std::wstring& xmlO
     return xmlOut.find(L"<IMAGE ") != std::wstring::npos || xmlOut.find(L"<WIM") != std::wstring::npos;
 }
 
-static bool parse_wim_xml_from_iso(FileReader& fr, uint32_t lba, uint32_t fileSize, std::vector<WimImageInfo>& out) {
+static std::wstring wim_format_version(const uint8_t* hdr) {
+    wchar_t buf[32];
+    StringCchPrintfW(buf, 32, L"%u.%u.%u", hdr[12], hdr[14], hdr[13]);
+    return buf;
+}
+
+static bool parse_wim_xml_from_iso(FileReader& fr, uint32_t lba, uint64_t fileSize, std::vector<WimImageInfo>& out) {
     const size_t WIM_HDR = 208;
     uint8_t hdr[WIM_HDR]{};
     if (!read_iso_file_bytes(fr, lba, fileSize, 0, hdr, (DWORD)WIM_HDR)) return false;
 
     bool isWim = !memcmp(hdr, "MSWIM", 5) || !memcmp(hdr, "WIM", 3);
+    if (!isWim) return false;
+
     std::wstring xml;
-
-    if (isWim) {
-        uint64_t xmlOff = rd_le64(hdr + 80);
-        uint64_t xmlLen = rd_le64(hdr + 88);
-        if (xmlLen > 0 && xmlLen <= 32 * 1024 * 1024 && xmlOff + xmlLen <= fileSize) {
-            std::vector<uint8_t> xmlBuf((size_t)xmlLen);
-            if (read_iso_file_bytes(fr, lba, fileSize, xmlOff, xmlBuf.data(), (DWORD)xmlLen)) {
-                if (wim_bytes_to_xml(xmlBuf.data(), xmlBuf.size(), xml)) {
-                    parse_wim_xml_images(xml, out);
-                    if (!out.empty()) return true;
-                }
-            }
-        }
-    }
-
-    const size_t SCAN = (size_t)std::min<uint32_t>(fileSize, 8u * 1024u * 1024u);
-    std::vector<uint8_t> scanBuf(SCAN);
-    if (!read_iso_file_bytes(fr, lba, fileSize, 0, scanBuf.data(), (DWORD)SCAN)) return false;
-
-    const char* needle = "<IMAGE ";
-    const char* wneedle = "<WIM";
-    for (size_t i = 0; i + 7 < SCAN; ++i) {
-        if (memcmp(scanBuf.data() + i, needle, 7) == 0 || memcmp(scanBuf.data() + i, wneedle, 4) == 0) {
-            size_t chunk = (size_t)std::min<uint64_t>(fileSize - i, 4 * 1024 * 1024);
-            std::vector<uint8_t> xmlBuf(chunk);
-            if (!read_iso_file_bytes(fr, lba, fileSize, i, xmlBuf.data(), (DWORD)chunk)) continue;
-            if (wim_bytes_to_xml(xmlBuf.data(), xmlBuf.size(), xml)) {
-                parse_wim_xml_images(xml, out);
-                if (!out.empty()) return true;
-            }
-            if (xmlBuf.size() >= 2) {
-                std::string ascii((const char*)xmlBuf.data(), std::min(xmlBuf.size(), (size_t)chunk));
-                size_t ap = ascii.find("<IMAGE ");
-                if (ap != std::string::npos) {
-                    int wlen = MultiByteToWideChar(CP_UTF8, 0, ascii.c_str() + (int)ap, -1, nullptr, 0);
-                    if (wlen > 0) {
-                        std::wstring wx(wlen, L'\0');
-                        MultiByteToWideChar(CP_UTF8, 0, ascii.c_str() + (int)ap, -1, &wx[0], wlen);
-                        parse_wim_xml_images(wx, out);
-                        if (!out.empty()) return true;
-                    }
-                }
-            }
-            break;
-        }
-    }
+    uint64_t xmlOff = rd_le64(hdr + 80);
+    uint64_t xmlLen = rd_le64(hdr + 88);
+    if (xmlLen == 0 || xmlLen > 32 * 1024 * 1024 || xmlOff + xmlLen > fileSize)
+        return false;
+    std::vector<uint8_t> xmlBuf((size_t)xmlLen);
+    if (!read_iso_file_bytes(fr, lba, fileSize, xmlOff, xmlBuf.data(), (DWORD)xmlLen))
+        return false;
+    if (!wim_bytes_to_xml(xmlBuf.data(), xmlBuf.size(), xml))
+        return false;
+    parse_wim_xml_images(xml, out);
     return !out.empty();
 }
 
@@ -1119,12 +1088,15 @@ static std::wstring udf_dname(const uint8_t* p, int len) {
     if (len <= 0) return L"";
     uint8_t comp = p[0];
     std::wstring out;
-    if (comp == 8) {
-        for (int i = 1; i + 1 < len; i += 2)
-            out.push_back((wchar_t)((p[i] << 8) | p[i + 1]));
-    }
-    else if (comp == 16) {
-        for (int i = 1; i < len; i++) out.push_back((wchar_t)p[i]);
+    if (comp == 8 || comp == 16) {
+        for (int i = 1; i + 1 < len; i += 2) {
+            wchar_t ch = (wchar_t)((p[i] << 8) | p[i + 1]);
+            if (ch) out.push_back(ch);
+        }
+        if (!out.empty()) return out;
+        if (comp == 16) {
+            for (int i = 1; i < len; i++) out.push_back((wchar_t)p[i]);
+        }
     }
     else {
         std::string a((const char*)p, len);
@@ -1135,9 +1107,50 @@ static std::wstring udf_dname(const uint8_t* p, int len) {
 
 static bool udf_read_short_ad(const uint8_t* p, uint32_t& lba, uint32_t& len) {
     uint32_t lt = rd_le32(p);
+    if ((lt & 0xC0000000) == 0xC0000000) return false;
     len = lt & 0x3FFFFFFF;
-    lba = (uint32_t)rd_le32(p + 4);
-    return len > 0;
+    lba = rd_le32(p + 4);
+    return len > 0 || lba > 0;
+}
+
+static bool udf_read_long_ad(const uint8_t* p, uint32_t& lba, uint32_t& len) {
+    uint32_t lt = rd_le32(p);
+    if ((lt & 0xC0000000) == 0xC0000000) return false;
+    len = lt & 0x3FFFFFFF;
+    lba = rd_le32(p + 4);
+    return len > 0 || lba > 0;
+}
+
+static bool udf_fe_data_extent(FileReader& fr, uint32_t partBase, uint32_t feLba,
+    uint32_t& dataLba, uint32_t& dataLen, uint64_t* infoLen = nullptr)
+{
+    std::vector<uint8_t> fe(g_sectorSize);
+    if (!fr.read_sector(partBase + feLba, fe.data(), g_sectorSize)) return false;
+    if (!udf_tag_ok(fe.data()) || rd_le16(fe.data()) != 261) return false;
+    if (infoLen) *infoLen = rd_le64(fe.data() + 56);
+    uint32_t lEa = rd_le32(fe.data() + 168);
+    uint32_t lAd = rd_le32(fe.data() + 172);
+    if (176 + lEa + 8 > g_sectorSize) return false;
+    const uint8_t* ad = fe.data() + 176 + ((lEa + 3) & ~3u);
+    if (lAd >= 16 && udf_read_long_ad(ad, dataLba, dataLen)) return true;
+    if (lAd >= 8 && udf_read_short_ad(ad, dataLba, dataLen)) return true;
+    return false;
+}
+
+static std::vector<std::wstring> split_path_components(const wchar_t* path) {
+    std::vector<std::wstring> parts;
+    if (!path) return parts;
+    std::wstring p = path;
+    if (!p.empty() && p[0] == L'/') p = p.substr(1);
+    size_t start = 0;
+    while (start < p.size()) {
+        size_t slash = p.find(L'/', start);
+        std::wstring comp = (slash == std::wstring::npos) ? p.substr(start) : p.substr(start, slash - start);
+        if (!comp.empty()) parts.push_back(comp);
+        if (slash == std::wstring::npos) break;
+        start = slash + 1;
+    }
+    return parts;
 }
 
 static void udf_scan_directory(FileReader& fr, uint32_t partBase, uint32_t dirLba, uint32_t dirLen,
@@ -1154,17 +1167,15 @@ static void udf_scan_directory(FileReader& fr, uint32_t partBase, uint32_t dirLb
         if (!udf_tag_ok(d)) break;
         uint16_t tagId = rd_le16(d);
         if (tagId != 257) break;
-        uint16_t crcLen = rd_le16(d + 10);
-        size_t descLen = ((size_t)crcLen + 3) & ~size_t(3);
-        if (descLen < 38 || off + descLen > buf.size()) break;
 
         uint8_t fileChar = d[18];
         uint8_t nameLen = d[19];
-        uint32_t fileLba = 0, fileLen = 0;
-        udf_read_short_ad(d + 20, fileLba, fileLen);
+        uint32_t icbLba = 0, icbLen = 0;
+        udf_read_long_ad(d + 20, icbLba, icbLen);
         uint16_t iuLen = rd_le16(d + 36);
         size_t nameOff = 38 + iuLen;
-        if (nameOff + nameLen > descLen) { off += descLen; continue; }
+        size_t descLen = ((size_t)nameOff + nameLen + 3) & ~size_t(3);
+        if (descLen < 38 || off + descLen > buf.size()) break;
 
         std::wstring name = udf_dname(d + nameOff, nameLen);
         if (!name.empty() && name.back() == L';') {
@@ -1175,8 +1186,20 @@ static void udf_scan_directory(FileReader& fr, uint32_t partBase, uint32_t dirLb
         bool isDir = (fileChar & 0x02) != 0;
         std::wstring full = path.empty() ? (L"/" + name) : (path + L"/" + name);
 
+        uint32_t dataLba = 0, dataLen = 0;
+        uint64_t infoLen = 0, fileSize = 0;
+        if (isDir) {
+            if (!udf_fe_data_extent(fr, partBase, icbLba, dataLba, dataLen))
+            { dataLba = icbLba; dataLen = icbLen ? icbLen : g_sectorSize; }
+        }
+        else {
+            if (!udf_fe_data_extent(fr, partBase, icbLba, dataLba, dataLen, &infoLen))
+            { dataLba = icbLba; dataLen = icbLen; infoLen = dataLen; }
+            fileSize = infoLen ? infoLen : dataLen;
+        }
+
         if (g_optShowFileList && (int)res.fileList.size() < g_optMaxFileList) {
-            FileListItem fl{ full, fileLen, isDir };
+            FileListItem fl{ full, isDir ? 0 : fileSize, isDir };
             res.fileList.push_back(fl);
         }
         if (isDir) res.totalDirs++; else res.totalFiles++;
@@ -1188,20 +1211,20 @@ static void udf_scan_directory(FileReader& fr, uint32_t partBase, uint32_t dirLb
             };
             for (const wchar_t* suf : kWinSuffixes) {
                 if (path_iequals_suffix(full, suf)) {
-                    res.winFiles.push_back({ full, partBase + fileLba, fileLen });
+                    res.winFiles.push_back({ full, partBase + dataLba, fileSize });
                     break;
                 }
             }
-            if (fileLen > 0) {
-                FileListItem item{ full, fileLen, false };
+            if (fileSize > 0) {
+                FileListItem item{ full, fileSize, false };
                 res.largestFiles.push_back(item);
                 std::sort(res.largestFiles.begin(), res.largestFiles.end(),
                     [](const FileListItem& a, const FileListItem& b) { return a.size > b.size; });
                 if (res.largestFiles.size() > 15) res.largestFiles.resize(15);
             }
         }
-        else if (depth < maxDepth && fileLba && name != L"." && name != L"..") {
-            udf_scan_directory(fr, partBase, fileLba, fileLen, full, res, depth + 1, maxDepth);
+        else if (depth < maxDepth && dataLba && name != L"." && name != L"..") {
+            udf_scan_directory(fr, partBase, dataLba, dataLen, full, res, depth + 1, maxDepth);
         }
 
         off += descLen;
@@ -1211,26 +1234,225 @@ static void udf_scan_directory(FileReader& fr, uint32_t partBase, uint32_t dirLb
 static bool udf_locate_root(FileReader& fr, const IsoSummary& sum, uint32_t& partBase,
     uint32_t& rootLba, uint32_t& rootLen)
 {
-    const int rootOffsets[] = { 400, 412, 456, 464 };
-    auto try_fsd_in_sector = [&](uint32_t s) -> bool {
+    auto try_fsd_in_sector = [&](uint32_t s, uint32_t pBase) -> bool {
         uint8_t sec[2048]{};
         if (!fr.read_sector(s, sec, g_sectorSize)) return false;
-        for (size_t base = 0; base + 480 <= g_sectorSize; base += 4) {
+        for (size_t base = 0; base + 416 <= g_sectorSize; base += 4) {
             if (!udf_tag_ok(sec + base) || rd_le16(sec + base) != 256) continue;
-            for (int ro : rootOffsets) {
-                if (udf_read_short_ad(sec + base + ro, rootLba, rootLen) && rootLba && rootLen) {
-                    partBase = s;
-                    return true;
-                }
-            }
+            uint32_t icbLba = 0, icbLen = 0;
+            if (!udf_read_long_ad(sec + base + 400, icbLba, icbLen) || !icbLba) continue;
+            partBase = pBase ? pBase : s;
+            if (udf_fe_data_extent(fr, partBase, icbLba, rootLba, rootLen))
+                return rootLba != 0;
+            rootLba = icbLba;
+            rootLen = icbLen ? icbLen : g_sectorSize;
+            return true;
         }
         return false;
     };
 
-    if (sum.udfPartitionStart && try_fsd_in_sector(sum.udfPartitionStart)) return true;
-    for (uint32_t s = 16; s < 512; ++s)
-        if (try_fsd_in_sector(s)) return true;
+    if (sum.udfPartitionStart) {
+        uint32_t searchLen = sum.udfPartitionLength ? std::min(sum.udfPartitionLength, 512u) : 512u;
+        for (uint32_t s = sum.udfPartitionStart; s < sum.udfPartitionStart + searchLen; ++s)
+            if (try_fsd_in_sector(s, sum.udfPartitionStart)) return true;
+    }
+
+    uint64_t totalSectors = fr.size_bytes() / g_sectorSize;
+    uint32_t msEnd = (uint32_t)std::min<uint64_t>(4096, totalSectors);
+    for (uint32_t s = 256; s < msEnd; ++s)
+        if (try_fsd_in_sector(s, 0)) return true;
+
+    for (uint32_t s = 16; s < 256; ++s)
+        if (try_fsd_in_sector(s, sum.udfPartitionStart)) return true;
     return false;
+}
+
+static bool udf_find_child(FileReader& fr, uint32_t partBase, uint32_t dirLba, uint32_t dirLen,
+    const std::wstring& childName, bool wantDir, uint32_t& outLba, uint32_t& outLen, uint64_t& outSize)
+{
+    std::wstring want = ToLower(childName);
+    size_t toRead = (size_t)std::min<uint32_t>(dirLen, 4 * 1024 * 1024);
+    if (toRead == 0) toRead = g_sectorSize;
+    std::vector<uint8_t> buf(toRead);
+    if (!fr.read_sector(partBase + dirLba, buf.data(), (DWORD)toRead)) return false;
+
+    size_t off = 0;
+    while (off + 38 <= buf.size()) {
+        const uint8_t* d = buf.data() + off;
+        if (!udf_tag_ok(d)) break;
+        if (rd_le16(d) != 257) break;
+
+        uint8_t fileChar = d[18];
+        bool entryIsDir = (fileChar & 0x02) != 0;
+        uint8_t nameLen = d[19];
+        uint32_t icbLba = 0, icbLen = 0;
+        if (!udf_read_long_ad(d + 20, icbLba, icbLen)) { off += 4; continue; }
+        uint16_t iuLen = rd_le16(d + 36);
+        size_t nameOff = 38 + iuLen;
+        size_t descLen = ((size_t)nameOff + nameLen + 3) & ~size_t(3);
+        if (descLen < 38 || off + descLen > buf.size()) break;
+
+        std::wstring name = udf_dname(d + nameOff, nameLen);
+        if (!name.empty() && name.back() == L';') {
+            size_t sc = name.find_last_of(L';');
+            if (sc != std::wstring::npos) name = name.substr(0, sc);
+        }
+        if (ToLower(name) != want) { off += descLen; continue; }
+        if (wantDir != entryIsDir) { off += descLen; continue; }
+
+        uint64_t infoLen = 0;
+        uint32_t dataLba = 0, dataLen = 0;
+        if (entryIsDir) {
+            if (!udf_fe_data_extent(fr, partBase, icbLba, outLba, outLen)) {
+                outLba = icbLba;
+                outLen = icbLen ? icbLen : g_sectorSize;
+            }
+            outSize = 0;
+            return true;
+        }
+        if (!udf_fe_data_extent(fr, partBase, icbLba, dataLba, dataLen, &infoLen)) {
+            dataLba = icbLba;
+            dataLen = icbLen;
+            infoLen = dataLen;
+        }
+        outLba = partBase + dataLba;
+        outLen = dataLen;
+        outSize = infoLen ? infoLen : dataLen;
+        return true;
+    }
+    return false;
+}
+
+static bool udf_resolve_path(FileReader& fr, const IsoSummary& sum, const wchar_t* path, IsoFileRef& out) {
+    uint32_t partBase = 0, rootLba = 0, rootLen = 0;
+    if (!udf_locate_root(fr, sum, partBase, rootLba, rootLen)) return false;
+
+    auto parts = split_path_components(path);
+    if (parts.empty()) return false;
+
+    uint32_t curLba = rootLba, curLen = rootLen;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        bool isLast = (i + 1 == parts.size());
+        uint32_t nextLba = 0, nextLen = 0;
+        uint64_t nextSize = 0;
+        if (!udf_find_child(fr, partBase, curLba, curLen, parts[i], !isLast, nextLba, nextLen, nextSize))
+            return false;
+        if (isLast) {
+            out.path = path;
+            out.lba = nextLba;
+            out.size = nextSize;
+            return true;
+        }
+        curLba = nextLba;
+        curLen = nextLen ? nextLen : g_sectorSize;
+    }
+    return false;
+}
+
+static bool iso9660_find_path(FileReader& fr, uint32_t rootLBA, uint32_t rootSize, bool joliet,
+    const wchar_t* path, IsoFileRef& out)
+{
+    auto parts = split_path_components(path);
+    if (parts.empty()) return false;
+
+    uint32_t curLba = rootLBA, curSize = rootSize;
+    for (size_t i = 0; i < parts.size(); ++i) {
+        std::vector<DirEntry> entries;
+        bool rr = false;
+        read_directory(fr, curLba, curSize, joliet, entries, rr);
+        bool isLast = (i + 1 == parts.size());
+        bool found = false;
+        for (const auto& e : entries) {
+            if (e.name == L"." || e.name == L"..") continue;
+            if (ToLower(e.name) != ToLower(parts[i])) continue;
+            if (isLast) {
+                if (e.isDir) return false;
+                out.path = path;
+                out.lba = e.lba;
+                out.size = e.size;
+                return true;
+            }
+            if (!e.isDir) return false;
+            curLba = e.lba;
+            curSize = e.size;
+            found = true;
+            break;
+        }
+        if (!found) return false;
+    }
+    return false;
+}
+
+struct UefiBootInfo {
+    std::wstring path;
+    std::wstring signer;
+    std::wstring note;
+};
+
+static bool scan_pe_cert_string(FileReader& fr, uint32_t lba, uint32_t size, const char* needle, std::wstring& signerOut) {
+    const DWORD SCAN = (DWORD)std::min<uint32_t>(size, 256 * 1024);
+    std::vector<uint8_t> buf(SCAN);
+    if (!read_iso_file_bytes(fr, lba, size, 0, buf.data(), SCAN)) return false;
+    const char* p = (const char*)buf.data();
+    size_t nlen = strlen(needle);
+    for (size_t i = 0; i + nlen < SCAN; ++i) {
+        if (memcmp(p + i, needle, nlen) != 0) continue;
+        size_t start = i;
+        while (start > 0 && p[start - 1] >= 0x20) start--;
+        size_t end = i + nlen;
+        while (end < SCAN && p[end] >= 0x20 && p[end] < 0x7F) end++;
+        std::string s(p + start, end - start);
+        int wlen = MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, nullptr, 0);
+        if (wlen <= 0) return true;
+        signerOut.assign(wlen, L'\0');
+        MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, &signerOut[0], wlen);
+        if (!signerOut.empty() && signerOut.back() == L'\0') signerOut.pop_back();
+        return true;
+    }
+    return false;
+}
+
+static void fast_scan_targeted(FileReader& fr, const IsoSummary& sum, ScanResult& scan) {
+    static const wchar_t* kPaths[] = {
+        L"/sources/install.esd", L"/sources/install.wim", L"/sources/boot.wim",
+        L"/sources/ei.cfg", L"/setup.exe", L"/bootmgr", L"/bootmgr.efi",
+        L"/efi/boot/bootx64.efi", L"/efi/boot/bootia32.efi"
+    };
+
+    uint32_t rootLBA = sum.joliet ? sum.jolietRootLBA : sum.rootDirLBA;
+    uint32_t rootSize = sum.joliet ? sum.jolietRootSize : sum.rootDirSize;
+
+    auto add_if_found = [&](const IsoFileRef& ref) {
+        for (const auto& w : scan.winFiles) {
+            if (ToLower(w.path) == ToLower(ref.path)) return;
+        }
+        scan.winFiles.push_back(ref);
+        scan.totalFiles++;
+
+        std::wstring lp = ToLower(ref.path);
+        if (lp.find(L"bootmgr") != std::wstring::npos || lp.find(L"bootmgfw") != std::wstring::npos)
+            scan.foundWinBootMgr = true;
+        if (lp.find(L"bootx64.efi") != std::wstring::npos || lp.find(L"bootia32.efi") != std::wstring::npos)
+            scan.foundGenericEFI = true;
+        if (lp.find(L"/efi/") != std::wstring::npos) scan.foundEFI = true;
+        if (lp.find(L"ei.cfg") != std::wstring::npos) scan.configHits.push_back(ref.path);
+    };
+
+    if (rootLBA && rootSize) {
+        for (const wchar_t* p : kPaths) {
+            IsoFileRef ref;
+            if (iso9660_find_path(fr, rootLBA, rootSize, sum.joliet, p, ref))
+                add_if_found(ref);
+        }
+    }
+
+    if (sum.hasUDF) {
+        for (const wchar_t* p : kPaths) {
+            IsoFileRef ref;
+            if (udf_resolve_path(fr, sum, p, ref))
+                add_if_found(ref);
+        }
+    }
 }
 
 static void udf_scan_tree(FileReader& fr, const IsoSummary& sum, ScanResult& res, int maxDepth) {
@@ -1284,9 +1506,9 @@ static void analyze_windows_media(FileReader& fr, const ScanResult& scan, Window
     }
 
     if (eiCfg && eiCfg->size > 0 && eiCfg->size < 1024 * 1024) {
-        std::vector<uint8_t> buf(eiCfg->size);
-        if (read_iso_file_bytes(fr, eiCfg->lba, eiCfg->size, 0, buf.data(), eiCfg->size)) {
-            std::string text((const char*)buf.data(), eiCfg->size);
+        std::vector<uint8_t> buf((size_t)eiCfg->size);
+        if (read_iso_file_bytes(fr, eiCfg->lba, eiCfg->size, 0, buf.data(), (DWORD)eiCfg->size)) {
+            std::string text((const char*)buf.data(), (size_t)eiCfg->size);
             parse_ei_cfg_text(text, win);
         }
     }
@@ -1327,7 +1549,7 @@ static void analyze_windows_media(FileReader& fr, const ScanResult& scan, Window
         else if (volLow.find(L"x86") != std::wstring::npos) win.architecture = L"x86";
     }
 
-    if (win.editions.empty() && likelyMicrosoft) {
+    if (win.editions.empty() && likelyMicrosoft && g_optFullScan) {
         std::vector<WimDiscovery> discovered;
         discover_wim_by_signature_scan(fr, fr.size_bytes(), discovered);
         std::vector<WimImageInfo> installEditions, bootEditions;
@@ -1553,13 +1775,15 @@ static void load_options_from_ini() {
     int showB = GetPrivateProfileIntW(L"IsoLister", L"ShowBootEntries", g_optShowBootEntries, g_iniPath.c_str());
     int showF = GetPrivateProfileIntW(L"IsoLister", L"ShowFileList", g_optShowFileList, g_iniPath.c_str());
     int maxF = GetPrivateProfileIntW(L"IsoLister", L"MaxFileList", g_optMaxFileList, g_iniPath.c_str());
+    int fullScan = GetPrivateProfileIntW(L"IsoLister", L"FullScan", g_optFullScan, g_iniPath.c_str());
     g_optDepth = (depth > 0 && depth <= 32) ? depth : g_optDepth;
     g_optMaxNodes = (maxN >= 1000 && maxN <= 1000000) ? maxN : g_optMaxNodes;
     g_optShowBootEntries = (showB != 0) ? 1 : 0;
     g_optShowFileList = (showF != 0) ? 1 : 0;
     g_optMaxFileList = (maxF >= 50 && maxF <= 100000) ? maxF : g_optMaxFileList;
-    log_line(L"Options: ScanDepth=%d, MaxNodes=%d, ShowBootEntries=%d, ShowFileList=%d, MaxFileList=%d",
-        g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList);
+    g_optFullScan = (fullScan != 0) ? 1 : 0;
+    log_line(L"Options: ScanDepth=%d, MaxNodes=%d, ShowBootEntries=%d, ShowFileList=%d, MaxFileList=%d, FullScan=%d",
+        g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList, g_optFullScan);
 }
 
 // -----------------------------------------------------------------------------
@@ -1824,32 +2048,81 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
     uint32_t rootLBA = sum.joliet ? sum.jolietRootLBA : sum.rootDirLBA;
     uint32_t rootSize = sum.joliet ? sum.jolietRootSize : sum.rootDirSize;
 
-    if (rootLBA && rootSize) {
-        scan = bfs_scan(fr, rootLBA, rootSize, sum.joliet, g_optDepth, g_optMaxNodes);
-        if (scan.rrDetected) sum.rockRidge = true;
+    LARGE_INTEGER t0{}, t1{}, freq{};
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&t0);
 
-        sum.foundGRUB2 = scan.foundGRUB2;
-        sum.foundGRUBLegacy = scan.foundGRUBLegacy;
-        sum.foundISOLINUX = scan.foundISOLINUX;
-        sum.foundSyslinuxMenu = scan.foundSyslinuxMenu;
-        sum.foundSystemdBoot = scan.foundSystemdBoot;
-        sum.foundWinBootMgr = scan.foundWinBootMgr;
-        sum.foundGenericEFI = scan.foundGenericEFI;
-        sum.configHits = scan.configHits;
-
-        if (sum.foundWinBootMgr) sum.bootLoader = L"Windows Boot Manager 🪟";
-        else if (sum.foundGRUB2) sum.bootLoader = L"GRUB2 🐧";
-        else if (sum.foundGRUBLegacy) sum.bootLoader = L"GRUB (legacy) 🐧";
-        else if (sum.foundSystemdBoot) sum.bootLoader = L"systemd-boot 🐧";
-        else if (sum.foundISOLINUX || sum.foundSyslinuxMenu) sum.bootLoader = L"ISOLINUX/SYSLINUX 🧰";
-        else if (sum.foundGenericEFI || sum.uefiBoot) sum.bootLoader = L"EFI (generic) ✨";
+    if (g_optFullScan) {
+        if (rootLBA && rootSize)
+            scan = bfs_scan(fr, rootLBA, rootSize, sum.joliet, g_optDepth, g_optMaxNodes);
+        if (sum.hasUDF)
+            udf_scan_tree(fr, sum, scan, g_optDepth);
+    }
+    else {
+        fast_scan_targeted(fr, sum, scan);
     }
 
-    if (sum.hasUDF)
-        udf_scan_tree(fr, sum, scan, g_optDepth);
+    if (scan.rrDetected) sum.rockRidge = true;
+    sum.foundGRUB2 = scan.foundGRUB2;
+    sum.foundGRUBLegacy = scan.foundGRUBLegacy;
+    sum.foundISOLINUX = scan.foundISOLINUX;
+    sum.foundSyslinuxMenu = scan.foundSyslinuxMenu;
+    sum.foundSystemdBoot = scan.foundSystemdBoot;
+    sum.foundWinBootMgr = scan.foundWinBootMgr || sum.uefiBoot;
+    sum.foundGenericEFI = scan.foundGenericEFI;
+    if (!scan.configHits.empty()) sum.configHits = scan.configHits;
+
+    if (sum.foundWinBootMgr) sum.bootLoader = L"Windows Boot Manager 🪟";
+    else if (sum.foundGRUB2) sum.bootLoader = L"GRUB2 🐧";
+    else if (sum.foundGRUBLegacy) sum.bootLoader = L"GRUB (legacy) 🐧";
+    else if (sum.foundSystemdBoot) sum.bootLoader = L"systemd-boot 🐧";
+    else if (sum.foundISOLINUX || sum.foundSyslinuxMenu) sum.bootLoader = L"ISOLINUX/SYSLINUX 🧰";
+    else if (sum.foundGenericEFI || sum.uefiBoot) sum.bootLoader = L"EFI (generic) ✨";
 
     WindowsInfo winInfo{};
     analyze_windows_media(fr, scan, winInfo, sum);
+
+    QueryPerformanceCounter(&t1);
+    double scanMs = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
+
+    std::wstring wimVersion;
+    const IsoFileRef* installRef = nullptr;
+    for (const auto& f : scan.winFiles) {
+        std::wstring lp = ToLower(f.path);
+        if (lp.find(L"install.esd") != std::wstring::npos || lp.find(L"install.wim") != std::wstring::npos) {
+            installRef = &f;
+            break;
+        }
+    }
+    if (installRef && installRef->size > 208) {
+        uint8_t hdr[208]{};
+        if (read_iso_file_bytes(fr, installRef->lba, installRef->size, 0, hdr, 208) && !memcmp(hdr, "MSWIM", 5))
+            wimVersion = wim_format_version(hdr);
+    }
+
+    std::vector<UefiBootInfo> uefiBoots;
+    static const wchar_t* kUefiPaths[] = { L"/bootmgr.efi", L"/efi/boot/bootx64.efi", L"/efi/boot/bootia32.efi" };
+    for (const wchar_t* up : kUefiPaths) {
+        IsoFileRef efiRef;
+        bool found = false;
+        if (rootLBA && iso9660_find_path(fr, rootLBA, rootSize, sum.joliet, up, efiRef)) found = true;
+        else if (sum.hasUDF && udf_resolve_path(fr, sum, up, efiRef)) found = true;
+        if (!found) continue;
+        UefiBootInfo bi{};
+        bi.path = up;
+        if (scan_pe_cert_string(fr, efiRef.lba, (uint32_t)std::min<uint64_t>(efiRef.size, UINT32_MAX),
+                "Microsoft Windows Production PCA", bi.signer))
+            bi.signer = L"Microsoft Windows Production PCA 2011";
+        else if (scan_pe_cert_string(fr, efiRef.lba, (uint32_t)std::min<uint64_t>(efiRef.size, UINT32_MAX), "Microsoft Corporation", bi.signer))
+            bi.signer = L"Microsoft Corporation";
+        if (bi.signer.find(L"2011") != std::wstring::npos)
+            bi.note = L"Может не пройти Secure Boot на системах с сертификатом Windows UEFI CA 2023";
+        uefiBoots.push_back(std::move(bi));
+    }
+
+    bool bootMarker = false;
+    if (fr.read_sector(17, sec.data(), g_sectorSize) && sec.size() >= 512)
+        bootMarker = (sec[510] == 0x55 && sec[511] == 0xAA);
 
     std::wstring fsType = L"💿 ISO 9660";
     std::vector<std::wstring> ext;
@@ -1868,7 +2141,39 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
     txt << L"Размер файла\t" << FormatFileSize(fr.size_bytes()) << L"\r\n";
     txt << L"Расширение\t" << GetFileExtensionLower(FileToLoad) << L"\r\n";
     txt << L"Размер сектора\t" << g_sectorSize << L" байт\r\n";
+    txt << L"⏱ Время анализа\t" << (int)(scanMs + 0.5) << L" мс"
+        << (g_optFullScan ? L" (полный скан)" : L" (быстрый режим)") << L"\r\n";
     txt << L"🗂 Тип ФС\t" << fsType << L"\r\n";
+
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"⚡ Быстрый анализ (как Rufus)\t\r\n";
+    if (sum.hasUDF) txt << L"ISO analysis\tОбраз UDF ✅\r\n";
+    txt << L"Boot Marker\t" << (bootMarker ? L"да ✅" : L"нет ❌") << L"\r\n";
+    if (!uefiBoots.empty()) {
+        txt << L"UEFI bootloaders\t\r\n";
+        for (const auto& bi : uefiBoots) {
+            txt << L"  •\t" << bi.path;
+            if (!bi.signer.empty()) txt << L" — " << bi.signer;
+            txt << L"\r\n";
+            if (!bi.note.empty()) txt << L"  ⚠️\t" << bi.note << L"\r\n";
+        }
+    }
+    if (!sum.volId.empty())
+        txt << L"ISO label\t'" << sum.volId << L"'\r\n";
+    if (winInfo.detected) {
+        std::wstring detected = winInfo.productVersion;
+        if (detected.empty()) detected = L"Windows";
+        txt << L"Detected\t" << detected << L"\r\n";
+        if (!winInfo.buildNumber.empty())
+            txt << L"Build\t" << winInfo.buildNumber << L"\r\n";
+        if (sum.uefiBoot || !uefiBoots.empty()) txt << L"Uses\tEFI ✅\r\n";
+        if (sum.biosBoot || sum.foundWinBootMgr) txt << L"Uses\tBootmgr (BIOS/UEFI) ✅\r\n";
+        if (!wimVersion.empty()) {
+            std::wstring installName = installRef && installRef->path.find(L".esd") != std::wstring::npos
+                ? L"Install.esd" : L"Install.wim";
+            txt << L"Uses\t" << installName << L" (version " << wimVersion << L") ✅\r\n";
+        }
+    }
     if (sum.hasPVD) {
         double MB = (double)sum.volBlocks * sum.logicalBlockSize / (1024.0 * 1024.0);
         txt << L"System ID\t" << sum.sysId << L"\r\n";
