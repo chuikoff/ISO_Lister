@@ -1691,6 +1691,55 @@ static bool parse_boot_catalog(FileReader& fr, uint32_t catalogLBA,
 // -----------------------------------------------------------------------------
 // Утилиты RichEdit: таб-стопы и раскраска эмодзи
 // -----------------------------------------------------------------------------
+#ifndef ST_UNICODE
+#define ST_UNICODE 8
+#endif
+
+static void sanitize_wstring_for_richedit(std::wstring& s) {
+    std::wstring out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ++i) {
+        wchar_t w = s[i];
+        if (w == L'\0') continue;
+        if (w >= 0xD800 && w <= 0xDBFF) {
+            if (i + 1 < s.size() && s[i + 1] >= 0xDC00 && s[i + 1] <= 0xDFFF) {
+                out.push_back(w);
+                out.push_back(s[i + 1]);
+                ++i;
+            }
+            continue;
+        }
+        if (w >= 0xDC00 && w <= 0xDFFF) continue;
+        out.push_back(w);
+    }
+    s.swap(out);
+}
+
+static void RichSetDefaultCharFormat(HWND hRE) {
+    CHARFORMAT2W cf{};
+    cf.cbSize = sizeof(cf);
+    cf.dwMask = CFM_FACE | CFM_COLOR | CFM_SIZE;
+    cf.crTextColor = RGB(0, 0, 0);
+    cf.yHeight = 240;
+    StringCchCopyW(cf.szFaceName, LF_FACESIZE, L"Consolas");
+    SendMessageW(hRE, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
+    SendMessageW(hRE, EM_SETBKGNDCOLOR, 0, RGB(255, 255, 255));
+}
+
+static bool RichSetTextUnicode(HWND hRE, const std::wstring& text) {
+    if (text.empty()) {
+        SetWindowTextW(hRE, L"");
+        return true;
+    }
+    SETTEXTEX stx{};
+    stx.flags = ST_UNICODE;
+    stx.codepage = 1200;
+    LRESULT lr = SendMessageW(hRE, EM_SETTEXTEX, (WPARAM)&stx, (LPARAM)text.c_str());
+    if (lr) return true;
+    SetWindowTextW(hRE, text.c_str());
+    return GetWindowTextLengthW(hRE) > 0;
+}
+
 static void RichSetTabs(HWND hRE, const std::vector<int>& tabsChars) {
     // Перевод «знаки» → twips по текущему шрифту RichEdit
     HFONT hFont = (HFONT)SendMessage(hRE, WM_GETFONT, 0, 0);
@@ -1750,7 +1799,9 @@ static std::vector<Range> find_emoji_ranges(const std::wstring& s) {
                 if (!is_emoji_cp(cp2)) break;
                 i += st2;
             }
-            r.push_back({ (LONG)start, (LONG)i });
+            LONG a = (LONG)start, b = (LONG)i;
+            if (b > a && (b - a) <= 64)
+                r.push_back({ a, b });
         }
         else {
             i += step;
@@ -1759,11 +1810,11 @@ static std::vector<Range> find_emoji_ranges(const std::wstring& s) {
     return r;
 }
 static void RichColorizeEmojis(HWND hRE, const std::wstring& fullText) {
-    // Базовый шрифт уже назначен моноширинный. Эмодзи сделаем Segoe UI Emoji.
     auto ranges = find_emoji_ranges(fullText);
     if (ranges.empty()) return;
 
     for (const auto& rg : ranges) {
+        if (rg.b <= rg.a || rg.a < 0 || rg.b > (LONG)fullText.size()) continue;
         CHARRANGE cr{ rg.a, rg.b };
         SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&cr);
         CHARFORMAT2W cf{}; cf.cbSize = sizeof(cf);
@@ -1771,27 +1822,40 @@ static void RichColorizeEmojis(HWND hRE, const std::wstring& fullText) {
         StringCchCopyW(cf.szFaceName, LF_FACESIZE, L"Segoe UI Emoji");
         SendMessageW(hRE, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
     }
-    // Снимем выделение
-    CHARRANGE crNone{ -1,-1 }; SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&crNone);
+    CHARRANGE crNone{ -1,-1 };
+    SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&crNone);
 }
 
 // -----------------------------------------------------------------------------
 // Чтение опций из INI
 // -----------------------------------------------------------------------------
-static void load_options_from_ini() {
-    if (g_iniPath.empty()) return;
-    int depth = GetPrivateProfileIntW(L"IsoLister", L"ScanDepth", g_optDepth, g_iniPath.c_str());
-    int maxN = GetPrivateProfileIntW(L"IsoLister", L"MaxNodes", g_optMaxNodes, g_iniPath.c_str());
-    int showB = GetPrivateProfileIntW(L"IsoLister", L"ShowBootEntries", g_optShowBootEntries, g_iniPath.c_str());
-    int showF = GetPrivateProfileIntW(L"IsoLister", L"ShowFileList", g_optShowFileList, g_iniPath.c_str());
-    int maxF = GetPrivateProfileIntW(L"IsoLister", L"MaxFileList", g_optMaxFileList, g_iniPath.c_str());
-    int fullScan = GetPrivateProfileIntW(L"IsoLister", L"FullScan", g_optFullScan, g_iniPath.c_str());
+static void load_options_from_ini_file(const wchar_t* iniPath) {
+    if (!iniPath || !iniPath[0]) return;
+    int depth = GetPrivateProfileIntW(L"IsoLister", L"ScanDepth", g_optDepth, iniPath);
+    int maxN = GetPrivateProfileIntW(L"IsoLister", L"MaxNodes", g_optMaxNodes, iniPath);
+    int showB = GetPrivateProfileIntW(L"IsoLister", L"ShowBootEntries", g_optShowBootEntries, iniPath);
+    int showF = GetPrivateProfileIntW(L"IsoLister", L"ShowFileList", g_optShowFileList, iniPath);
+    int maxF = GetPrivateProfileIntW(L"IsoLister", L"MaxFileList", g_optMaxFileList, iniPath);
+    int fullScan = GetPrivateProfileIntW(L"IsoLister", L"FullScan", g_optFullScan, iniPath);
     g_optDepth = (depth > 0 && depth <= 32) ? depth : g_optDepth;
     g_optMaxNodes = (maxN >= 1000 && maxN <= 1000000) ? maxN : g_optMaxNodes;
     g_optShowBootEntries = (showB != 0) ? 1 : 0;
     g_optShowFileList = (showF != 0) ? 1 : 0;
     g_optMaxFileList = (maxF >= 50 && maxF <= 100000) ? maxF : g_optMaxFileList;
     g_optFullScan = (fullScan != 0) ? 1 : 0;
+}
+
+static void load_options_from_ini() {
+    if (g_iniPath.empty()) return;
+    load_options_from_ini_file(g_iniPath.c_str());
+    wchar_t wincmd[MAX_PATH]{};
+    StringCchCopyW(wincmd, MAX_PATH, g_iniPath.c_str());
+    wchar_t* slash = wcsrchr(wincmd, L'\\');
+    if (slash) {
+        StringCchCopyW(slash + 1, MAX_PATH - (size_t)(slash + 1 - wincmd), L"wincmd.ini");
+        if (_wcsicmp(wincmd, g_iniPath.c_str()) != 0)
+            load_options_from_ini_file(wincmd);
+    }
     log_line(L"Options: ScanDepth=%d, MaxNodes=%d, ShowBootEntries=%d, ShowFileList=%d, MaxFileList=%d, FullScan=%d",
         g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList, g_optFullScan);
 }
@@ -2356,14 +2420,19 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
     log_line(L"ListLoadW: file=\"%s\" flags=%d", FileToLoad ? FileToLoad : L"(null)", ShowFlags);
 
     std::wstring text = generate_iso_report(FileToLoad);
+    sanitize_wstring_for_richedit(text);
+    log_line(L"ListLoadW: report chars=%u", (unsigned)text.size());
 
-    // ----- СОЗДАНИЕ ОКНА ПЛАГИНА (RichEdit) -----
+    bool wrapText = (ShowFlags & lcp_wraptext) != 0;
+    DWORD reStyle = WS_CHILD | WS_VISIBLE | WS_VSCROLL |
+        ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | ES_WANTRETURN;
+    if (!wrapText) reStyle |= WS_HSCROLL | ES_AUTOHSCROLL;
+
     HWND hRE = CreateWindowExW(
         WS_EX_CLIENTEDGE,
         MSFTEDIT_CLASS,
         L"",
-        WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_HSCROLL |
-        ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_READONLY | ES_WANTRETURN,
+        reStyle,
         0, 0, 0, 0,
         ParentWin,
         (HMENU)1,
@@ -2377,12 +2446,12 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
 
     SubclassRichEdit(hRE);
 
-    // Базовый шрифт — моноширинный (табличный текст), без переносов
     if (g_hMonoFont) SendMessageW(hRE, WM_SETFONT, (WPARAM)g_hMonoFont, TRUE);
+    RichSetDefaultCharFormat(hRE);
 
-    // Глобальные табы: сначала — сводка (две колонки),
-    // + далее — запас под многоколонный Boot Catalog.
-    // Все табы задаём сразу — RichEdit применяет их ко всему тексту.
+    if (wrapText)
+        SendMessageW(hRE, EM_SETTARGETDEVICE, 0, 0);
+
     std::vector<int> tabs = {
         TAB_MAIN_1,
         TAB_BOOT_0, TAB_BOOT_1, TAB_BOOT_2, TAB_BOOT_3,
@@ -2392,10 +2461,14 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
     };
     RichSetTabs(hRE, tabs);
 
-    SetWindowTextW(hRE, text.c_str());
+    if (!RichSetTextUnicode(hRE, text)) {
+        log_line(L"ListLoadW: RichSetTextUnicode failed, len=%u", (unsigned)text.size());
+        RichSetTextUnicode(hRE, L"Ошибка отображения отчёта в RichEdit.\r\n");
+    }
 
-    // Сделаем эмодзи цветными
     RichColorizeEmojis(hRE, text);
+    SendMessageW(hRE, EM_SETSEL, 0, 0);
+    SendMessageW(hRE, EM_SCROLLCARET, 0, 0);
 
     return hRE;
 }
