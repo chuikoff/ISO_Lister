@@ -14,11 +14,9 @@ WLX Lister-плагин для [Total Commander](https://www.ghisler.com/) — �
 
 ## Установка
 
-1. Скачайте `IsoLister.wlx64` из [релизов](https://github.com/chuikoff/IsoLister/releases).
-2. Скопируйте в папку плагинов Total Commander, например:
-   ```
-   %TOTALCMD%\Plugins\ISO_Lister\IsoLister.wlx64
-   ```
+1. Скачайте `ISO_Lister_v1.1.0_wlx64.zip` из [релизов](https://github.com/chuikoff/ISO_Lister/releases).
+2. Откройте архив в Total Commander — TC предложит автоматическую установку (`pluginst.inf`).
+   Либо вручную распакуйте в `%TOTALCMD%\Plugins\wlx\ISO_Lister\`.
 3. Перезапустите Total Commander.
 4. Откройте любой `.iso` и нажмите **F3** (Lister).
 
@@ -66,4 +64,4 @@ MSBuild IsoLister.sln /p:Configuration=Release /p:Platform=x64
 
 ## Лицензия
 
-MIT — см. репозиторий.
+MIT — см. [LICENSE](LICENSE).
