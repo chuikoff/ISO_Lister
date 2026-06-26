@@ -3350,12 +3350,13 @@ extern "C" HWND __stdcall ListLoad(HWND ParentWin, char* FileToLoad, int ShowFla
     return ListLoadW(ParentWin, &w[0], ShowFlags);
 }
 
-// Detect: ISO/DMG по расширению; IMG — только образ диска/ISO, не GEM/графика (конфликт MULTIMEDIA).
+// Detect: ISO/DMG — обычные файлы; IMG — MULTIMEDIA в TC, без этого флага плагин игнорируется.
 static const char kIsoListerDetectString[] =
     "EXT=\"ISO\" | EXT=\"DMG\" | "
-    "(EXT=\"IMG\" & [510]=85 & [511]=170) | "
-    "(EXT=\"IMG\" & [32769]=67 & [32770]=68 & [32771]=48 & [32772]=48 & [32773]=49) | "
-    "(EXT=\"IMG\" & SIZE>50000000)";
+    "(MULTIMEDIA & EXT=\"IMG\" & [510]=85 & [511]=170) | "
+    "(MULTIMEDIA & EXT=\"IMG\" & [32769]=67 & [32770]=68 & [32771]=48 & [32772]=48 & [32773]=49) | "
+    "(MULTIMEDIA & EXT=\"IMG\" & SIZE>50000000) | "
+    "(MULTIMEDIA & EXT=\"IMG\")";
 
 extern "C" void __stdcall ListGetDetectString(char* DetectString, int maxlen)
 {

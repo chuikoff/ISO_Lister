@@ -22,20 +22,18 @@ WLX Lister-плагин для [Total Commander](https://www.ghisler.com/) — �
 
 ### `.img` не открывается плагином (конфликт с Imagine / mthumbs)
 
-Total Commander считает `.img` **мультимедиа** (формат картинок в IrfanView/Imagine). Плагины с `MULTIMEDIA` в detect (mthumbs, Imagine, MMedia…) перехватывают F3 раньше, чем «голый» `EXT="IMG"`.
+Total Commander помечает `.img` как **MULTIMEDIA** (картинки IrfanView/Imagine). Для таких файлов TC **не вызывает** плагины без `MULTIMEDIA` в detect — поэтому ISO/DMG работают, а IMG нет (даже на позиции 0).
 
-**Что сделать:**
+**Решение (v1.1.5+):** в DLL и в `0_detect` для IMG обязателен `MULTIMEDIA &` (без него TC игнорирует плагин для `.img`):
 
-1. Поднимите **IsoLister** в списке Lister-плагинов **выше** mthumbs/Imagine (лучше — на позицию 0).
-2. Detect string (уже в плагине v1.1.4+):
+```
+EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | (MULTIMEDIA & EXT="IMG")
+```
 
-   ```
-   EXT="ISO" | EXT="DMG" | (EXT="IMG" & [510]=85 & [511]=170) | (EXT="IMG" & [32769]=67 & [32770]=68 & [32771]=48 & [32772]=48 & [32773]=49) | (EXT="IMG" & SIZE>50000000)
-   ```
-
-   Это ловит MBR (55 AA), ISO9660 (CD001) и крупные образы (>50 МБ), но не маленькие `.img`-картинки.
-
-3. В **Imagine** / **mthumbs** сузьте detect — не используйте голый `MULTIMEDIA` без списка расширений, если мешает.
+1. **IsoLister** — позиция **0** в Lister-плагинах; перезапустите TC после обновления DLL.
+2. В настройках плагина нажмите «По умолчанию» (подтянет строку из DLL) — **без кавычек** вокруг всей строки в INI.
+3. **Imagine** (#8): замените голый `MULTIMEDIA` на список расширений **без** `IMG`, иначе перехватывает образы диска.
+4. Лог плагина: `%TEMP%\IsoLister.log` — строка `ListLoadW: file=...Panasonic.img` означает, что плагин вызван.
 2. Откройте архив в Total Commander — TC предложит автоматическую установку (`pluginst.inf`).
    Либо вручную распакуйте в `%TOTALCMD%\Plugins\wlx\ISO_Lister\`.
 3. Перезапустите Total Commander.
