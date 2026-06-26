@@ -305,6 +305,288 @@ static bool probe_iso_layout(FileReader& fr, UINT& sectorSizeOut) {
     return false;
 }
 
+// -----------------------------------------------------------------------------
+// Образ диска (MBR/GPT) — raw .img/.bin, не ISO9660
+// -----------------------------------------------------------------------------
+static const UINT DISK_SECTOR_SIZE = 512;
+
+static bool has_boot_signature(const uint8_t* sec) {
+    return sec[510] == 0x55 && sec[511] == 0xAA;
+}
+
+static std::wstring mbr_partition_type_name(uint8_t type) {
+    switch (type) {
+    case 0x00: return L"Пусто";
+    case 0x01: return L"FAT12";
+    case 0x04: return L"FAT16 (<32M)";
+    case 0x05: return L"Extended";
+    case 0x06: return L"FAT16";
+    case 0x07: return L"NTFS / exFAT / HPFS";
+    case 0x0B: return L"FAT32 (CHS)";
+    case 0x0C: return L"FAT32 (LBA)";
+    case 0x0E: return L"FAT16 (LBA)";
+    case 0x0F: return L"Extended (LBA)";
+    case 0x11: return L"FAT12 (скрытый)";
+    case 0x14: return L"FAT16 (скрытый, <32M)";
+    case 0x16: return L"FAT16 (скрытый)";
+    case 0x17: return L"NTFS (скрытый)";
+    case 0x1B: return L"FAT32 (скрытый)";
+    case 0x1C: return L"FAT32 LBA (скрытый)";
+    case 0x1E: return L"FAT16 LBA (скрытый)";
+    case 0x27: return L"Windows RE / Recovery";
+    case 0x82: return L"Linux swap";
+    case 0x83: return L"Linux";
+    case 0x84: return L"Hibernation";
+    case 0x85: return L"Linux extended";
+    case 0xA8: return L"Recovery";
+    case 0xEE: return L"GPT (защитная MBR)";
+    case 0xEF: return L"EFI System";
+    case 0xFD: return L"Linux RAID";
+    default: {
+        wchar_t buf[32];
+        StringCchPrintfW(buf, 32, L"0x%02X", type);
+        return buf;
+    }
+    }
+}
+
+static std::wstring trim_ascii_label(const char* s, size_t len) {
+    std::string t(s, len);
+    while (!t.empty() && (unsigned char)t.back() <= ' ') t.pop_back();
+    size_t i = 0;
+    while (i < t.size() && (unsigned char)t[i] <= ' ') ++i;
+    t = t.substr(i);
+    if (t.empty()) return L"";
+    bool printable = true;
+    for (unsigned char c : t) {
+        if (c < 0x20 || c == 0x7F) { printable = false; break; }
+    }
+    return printable ? ATrimRight(t) : L"";
+}
+
+struct DiskPartitionInfo {
+    int index = 0;
+    uint8_t mbrType = 0;
+    bool bootable = false;
+    uint64_t startLBA = 0;
+    uint64_t sectorCount = 0;
+    std::wstring tableType;   // MBR / GPT
+    std::wstring typeName;
+    std::wstring gptName;
+    std::wstring fsName;
+    std::wstring fsDetail;
+    std::wstring volumeLabel;
+    std::wstring oemId;
+};
+
+struct DiskImageInfo {
+    bool valid = false;
+    bool gpt = false;
+    uint32_t diskSignature = 0;
+    std::wstring bootCodeHint;
+    std::vector<DiskPartitionInfo> partitions;
+};
+
+static bool guid_equal(const uint8_t* a, const uint8_t* b) {
+    return memcmp(a, b, 16) == 0;
+}
+
+static const uint8_t kGuidEfiSystem[] = {
+    0x28,0x73,0x2A,0xC1,0x1F,0xF8,0xD2,0x11,0xBA,0x4B,0x00,0xA0,0xC9,0x3E,0xC9,0x3B };
+static const uint8_t kGuidMsBasicData[] = {
+    0xA2,0xA0,0xD0,0xEB,0xE5,0xB9,0x33,0x44,0x87,0xC0,0x68,0xB6,0xB7,0x26,0x99,0xC7 };
+static const uint8_t kGuidLinuxFs[] = {
+    0xAF,0x3D,0xC6,0x0F,0x83,0x84,0x72,0x47,0x8E,0x79,0x3D,0x69,0xD8,0x47,0x7D,0xE4 };
+
+static std::wstring gpt_type_name(const uint8_t* typeGuid) {
+    if (guid_equal(typeGuid, kGuidEfiSystem)) return L"EFI System";
+    if (guid_equal(typeGuid, kGuidMsBasicData)) return L"Microsoft Basic Data";
+    if (guid_equal(typeGuid, kGuidLinuxFs)) return L"Linux filesystem";
+    wchar_t buf[64];
+    StringCchPrintfW(buf, 64, L"%02X%02X%02X%02X-...",
+        typeGuid[3], typeGuid[2], typeGuid[1], typeGuid[0]);
+    return buf;
+}
+
+static void detect_fs_vbr(FileReader& fr, uint64_t startLBA, DiskPartitionInfo& part) {
+    uint8_t vbr[512];
+    if (!fr.read_at(startLBA * DISK_SECTOR_SIZE, vbr, 512) || !has_boot_signature(vbr))
+        return;
+
+    part.oemId = trim_ascii_label((const char*)vbr + 3, 8);
+    if (memcmp(vbr + 3, "NTFS    ", 8) == 0) {
+        part.fsName = L"NTFS";
+        uint16_t bps = rd_le16(vbr + 11);
+        uint8_t spc = vbr[13];
+        uint64_t total = rd_le64(vbr + 48);
+        wchar_t buf[128];
+        StringCchPrintfW(buf, 128, L"%u байт/сек, %u сек/кластер, %llu секторов",
+            bps, spc, total);
+        part.fsDetail = buf;
+        return;
+    }
+    if (memcmp(vbr + 3, "EXFAT   ", 8) == 0) {
+        part.fsName = L"exFAT";
+        return;
+    }
+    if (memcmp(vbr + 82, "FAT32   ", 8) == 0 || part.mbrType == 0x0B || part.mbrType == 0x0C) {
+        part.fsName = L"FAT32";
+        part.volumeLabel = trim_ascii_label((const char*)vbr + 0x47, 11);
+        if (part.volumeLabel.empty())
+            part.volumeLabel = trim_ascii_label((const char*)vbr + 0x5B, 11);
+        uint16_t bps = rd_le16(vbr + 11);
+        uint8_t spc = vbr[13];
+        uint32_t total32 = rd_le32(vbr + 32);
+        wchar_t buf[128];
+        StringCchPrintfW(buf, 128, L"%u байт/сек, %u сек/кластер, %u секторов",
+            bps, spc, total32);
+        part.fsDetail = buf;
+        return;
+    }
+    if (memcmp(vbr + 54, "FAT16   ", 8) == 0 || memcmp(vbr + 54, "FAT12   ", 8) == 0) {
+        part.fsName = memcmp(vbr + 54, "FAT12   ", 8) == 0 ? L"FAT12" : L"FAT16";
+        part.volumeLabel = trim_ascii_label((const char*)vbr + 0x2B, 11);
+        return;
+    }
+    if (memcmp(vbr + 3, "MSDOS5.0", 8) == 0 || memcmp(vbr + 3, "mkfs.fat", 8) == 0 ||
+        memcmp(vbr + 3, "MSWIN4.1", 8) == 0) {
+        part.fsName = L"FAT";
+        part.volumeLabel = trim_ascii_label((const char*)vbr + 0x47, 11);
+    }
+}
+
+static bool parse_gpt_partitions(FileReader& fr, DiskImageInfo& out) {
+    uint8_t hdr[512];
+    if (!fr.read_at(DISK_SECTOR_SIZE, hdr, 512)) return false;
+    if (memcmp(hdr, "EFI PART", 8) != 0) return false;
+
+    uint32_t entryLBA = (uint32_t)rd_le64(hdr + 72);
+    uint32_t entryCount = rd_le32(hdr + 80);
+    uint32_t entrySize = rd_le32(hdr + 84);
+    if (!entryLBA || !entryCount || entrySize < 128 || entrySize > 4096) return false;
+
+    std::vector<uint8_t> entries((size_t)entryCount * entrySize);
+    uint64_t bytes = (uint64_t)entryCount * entrySize;
+    if (!fr.read_at((uint64_t)entryLBA * DISK_SECTOR_SIZE, entries.data(), (DWORD)std::min<uint64_t>(bytes, 2 * 1024 * 1024)))
+        return false;
+
+    out.gpt = true;
+    int idx = 0;
+    for (uint32_t i = 0; i < entryCount; ++i) {
+        const uint8_t* e = entries.data() + (size_t)i * entrySize;
+        bool empty = true;
+        for (int b = 0; b < 16; ++b) if (e[b]) { empty = false; break; }
+        if (empty) continue;
+
+        uint64_t first = rd_le64(e + 32);
+        uint64_t last = rd_le64(e + 40);
+        if (!first || last < first) continue;
+
+        DiskPartitionInfo p{};
+        p.index = ++idx;
+        p.tableType = L"GPT";
+        p.typeName = gpt_type_name(e);
+        p.startLBA = first;
+        p.sectorCount = last - first + 1;
+        for (int c = 56; c + 1 < (int)entrySize && c < 56 + 72; c += 2) {
+            wchar_t ch = (wchar_t)rd_le16(e + c);
+            if (!ch) break;
+            p.gptName.push_back(ch);
+        }
+        detect_fs_vbr(fr, p.startLBA, p);
+        out.partitions.push_back(std::move(p));
+    }
+    return !out.partitions.empty();
+}
+
+static bool probe_disk_image(FileReader& fr, DiskImageInfo& out) {
+    uint8_t mbr[512];
+    if (!fr.read_at(0, mbr, 512) || !has_boot_signature(mbr)) return false;
+
+    out.valid = true;
+    out.diskSignature = rd_le32(mbr + 440);
+    if (mbr[0] == 0x33 && mbr[1] == 0xC0) out.bootCodeHint = L"x86 MBR загрузчик";
+    else if (!memcmp(mbr, "\xEB\x58\x90", 3) || !memcmp(mbr, "\xEB\x63\x90", 3)) out.bootCodeHint = L"x86 VBR/загрузчик";
+
+    bool hasGptProtective = false;
+    for (int i = 0; i < 4; ++i) {
+        const uint8_t* pe = mbr + 446 + i * 16;
+        if (pe[4] == 0xEE) hasGptProtective = true;
+    }
+    if (hasGptProtective && parse_gpt_partitions(fr, out))
+        return true;
+
+    int idx = 0;
+    for (int i = 0; i < 4; ++i) {
+        const uint8_t* pe = mbr + 446 + i * 16;
+        uint8_t type = pe[4];
+        uint32_t start = rd_le32(pe + 8);
+        uint32_t count = rd_le32(pe + 12);
+        if (!type && !start && !count) continue;
+
+        DiskPartitionInfo p{};
+        p.index = ++idx;
+        p.tableType = L"MBR";
+        p.mbrType = type;
+        p.bootable = (pe[0] == 0x80);
+        p.typeName = mbr_partition_type_name(type);
+        p.startLBA = start;
+        p.sectorCount = count;
+        if (type != 0x05 && type != 0x0F && type != 0xEE)
+            detect_fs_vbr(fr, p.startLBA, p);
+        out.partitions.push_back(std::move(p));
+    }
+    return !out.partitions.empty();
+}
+
+static std::wstring generate_disk_image_report(const wchar_t* FileToLoad, FileReader& fr, const DiskImageInfo& disk) {
+    std::wostringstream txt;
+    txt << L"🔌 IsoLister\tv" << ISO_LISTER_VERSION_WSTR << L" (" << ISO_LISTER_GIT_SHA_WSTR << L")\r\n";
+    txt << L"Сборка\t" << ISO_LISTER_BUILD_TIMESTAMP_WSTR << L"\r\n";
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"📄 Файл\t" << FileToLoad << L"\r\n";
+    txt << L"Размер файла\t" << FormatFileSize(fr.size_bytes()) << L"\r\n";
+    txt << L"Расширение\t" << GetFileExtensionLower(FileToLoad) << L"\r\n";
+    txt << L"Тип образа\t💽 Образ диска (raw sector dump)\r\n";
+    txt << L"Размер сектора\t512 байт\r\n";
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"🧱 Разметка диска\t" << (disk.gpt ? L"GPT ✅" : L"MBR ✅") << L"\r\n";
+    if (disk.diskSignature)
+        txt << L"Disk signature\t0x" << std::hex << std::uppercase << disk.diskSignature << std::dec << L"\r\n";
+    if (!disk.bootCodeHint.empty())
+        txt << L"Загрузочный код\t" << disk.bootCodeHint << L"\r\n";
+    txt << L"Разделов\t" << disk.partitions.size() << L"\r\n";
+    txt << repeat(L'─', 90) << L"\r\n";
+
+    for (const auto& p : disk.partitions) {
+        txt << L"📦 Раздел #" << p.index << L"\t" << p.tableType;
+        if (p.bootable) txt << L" (bootable)";
+        txt << L"\r\n";
+        txt << L"  Тип\t" << p.typeName;
+        if (p.mbrType) txt << L" (0x" << std::hex << std::uppercase << (int)p.mbrType << std::dec << L")";
+        txt << L"\r\n";
+        if (!p.gptName.empty()) txt << L"  Имя GPT\t" << p.gptName << L"\r\n";
+        txt << L"  Начало\tLBA " << p.startLBA << L" (" << FormatFileSize(p.startLBA * DISK_SECTOR_SIZE) << L")\r\n";
+        txt << L"  Размер\t" << FormatFileSize(p.sectorCount * DISK_SECTOR_SIZE)
+            << L" (" << p.sectorCount << L" секторов)\r\n";
+        if (!p.fsName.empty()) txt << L"  ФС\t" << p.fsName << L" ✅\r\n";
+        if (!p.fsDetail.empty()) txt << L"  Детали ФС\t" << p.fsDetail << L"\r\n";
+        if (!p.volumeLabel.empty()) txt << L"  Метка тома\t'" << p.volumeLabel << L"'\r\n";
+        if (!p.oemId.empty()) txt << L"  OEM ID\t" << p.oemId << L"\r\n";
+        txt << L"\r\n";
+    }
+
+    uint64_t imageSectors = fr.size_bytes() / DISK_SECTOR_SIZE;
+    uint64_t used = 0;
+    for (const auto& p : disk.partitions) used += p.sectorCount;
+    if (imageSectors > used)
+        txt << L"Неразмечено\t" << FormatFileSize((imageSectors - used) * DISK_SECTOR_SIZE) << L"\r\n";
+
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"ℹ️ Примечание\tЭто образ диска, не ISO9660. Анализ ISO/UDF внутри разделов не выполняется.\r\n";
+    return txt.str();
+}
+
 static void parse_pvd(const uint8_t* vdbuf, IsoSummary& out) {
     size_t o = 0;
     o += 1 /*type*/ + 5 /*CD001*/ + 1 /*ver*/ + 1 /*unused*/;
@@ -2292,7 +2574,10 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
 
     UINT detectedSector = DEFAULT_SECTOR_SIZE;
     if (!probe_iso_layout(fr, detectedSector)) {
-        txt << L"Ошибка\tНе обнаружена сигнатура ISO9660 (CD001) ❌\r\n";
+        DiskImageInfo disk;
+        if (probe_disk_image(fr, disk))
+            return generate_disk_image_report(FileToLoad, fr, disk);
+        txt << L"Ошибка\tНе обнаружена сигнатура ISO9660 (CD001) и разметка диска (MBR/GPT) ❌\r\n";
         txt << L"Размер файла\t" << FormatFileSize(fr.size_bytes()) << L"\r\n";
         txt << L"Расширение\t" << GetFileExtensionLower(FileToLoad) << L"\r\n";
         return txt.str();
@@ -2776,14 +3061,23 @@ int wmain(int argc, wchar_t** argv) {
     }
     std::wstring report = generate_iso_report(argv[1]);
     fputws(report.c_str(), stdout);
-    const wchar_t* checks[] = {
-        L"IsoLister", L"Volume ID", L"ISO 9660", nullptr
-    };
-    for (int i = 0; checks[i]; ++i) {
-        if (report.find(checks[i]) == std::wstring::npos) {
-            fwprintf(stderr, L"VERIFY FAIL: missing '%s'\n", checks[i]);
-            return 1;
-        }
+    if (report.find(L"IsoLister") == std::wstring::npos) {
+        fwprintf(stderr, L"VERIFY FAIL: missing 'IsoLister'\n");
+        return 1;
+    }
+    bool isIso = report.find(L"ISO 9660") != std::wstring::npos;
+    bool isDisk = report.find(L"Образ диска") != std::wstring::npos;
+    if (!isIso && !isDisk) {
+        fwprintf(stderr, L"VERIFY FAIL: unknown report type\n");
+        return 1;
+    }
+    if (isIso && report.find(L"Volume ID") == std::wstring::npos) {
+        fwprintf(stderr, L"VERIFY FAIL: missing 'Volume ID'\n");
+        return 1;
+    }
+    if (isDisk && report.find(L"Разметка диска") == std::wstring::npos) {
+        fwprintf(stderr, L"VERIFY FAIL: missing disk layout section\n");
+        return 1;
     }
     fwprintf(stderr, L"VERIFY OK\n");
     return 0;
