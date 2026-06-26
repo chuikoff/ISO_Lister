@@ -639,6 +639,18 @@ struct WindowsInfo {
     std::vector<WimImageInfo> editions;
 };
 
+struct LinuxInfo {
+    bool detected = false;
+    std::wstring distro;
+    std::wstring version;
+    std::wstring flavor;
+    std::wstring arch;
+    std::wstring imageType;
+    std::wstring diskInfoLine;
+    std::wstring kernelPath;
+    std::wstring squashfsPath;
+};
+
 static bool read_iso_file_bytes(FileReader& fr, uint32_t lba, uint64_t fileSize,
     uint64_t offsetInFile, void* buf, DWORD size)
 {
@@ -963,6 +975,7 @@ struct ScanResult {
     std::vector<std::wstring> configHits;
     std::vector<FileListItem> fileList;
     std::vector<IsoFileRef> winFiles;
+    std::vector<IsoFileRef> linuxFiles;
     std::vector<FileListItem> largestFiles;
     int totalFiles = 0;
     int totalDirs = 0;
@@ -1422,6 +1435,208 @@ static bool scan_pe_cert_string(FileReader& fr, uint32_t lba, uint32_t size, con
     return false;
 }
 
+static std::wstring trim_w(const std::wstring& s) {
+    size_t a = 0, b = s.size();
+    while (a < b && iswspace(s[a])) a++;
+    while (b > a && iswspace(s[b - 1])) b--;
+    return (a < b) ? s.substr(a, b - a) : std::wstring{};
+}
+
+static bool has_windows_install_evidence(const ScanResult& scan) {
+    for (const auto& f : scan.winFiles) {
+        std::wstring lp = ToLower(f.path);
+        if (lp.find(L"/sources/install.") != std::wstring::npos) return true;
+        if (lp.find(L"/sources/boot.wim") != std::wstring::npos) return true;
+        if (lp.find(L"/sources/ei.cfg") != std::wstring::npos) return true;
+        if (lp.find(L"/setup.exe") != std::wstring::npos) return true;
+        if (lp.find(L"bootmgr") != std::wstring::npos) return true;
+    }
+    return false;
+}
+
+static bool is_likely_microsoft_iso(const IsoSummary& sum, const ScanResult& scan) {
+    if (has_windows_install_evidence(scan)) return true;
+    if (scan.foundWinBootMgr) return true;
+    std::wstring pub = ToLower(sum.publisherId + L" " + sum.dataPreparerId);
+    std::wstring app = ToLower(sum.appId);
+    if (pub.find(L"microsoft") != std::wstring::npos && app.find(L"oscdimg") != std::wstring::npos)
+        return true;
+    std::wstring vol = ToLower(sum.volId);
+    if (vol.find(L"windows") != std::wstring::npos) return true;
+    if (vol.find(L"win7") != std::wstring::npos || vol.find(L"win8") != std::wstring::npos) return true;
+    if (vol.find(L"win10") != std::wstring::npos || vol.find(L"win11") != std::wstring::npos) return true;
+    if (vol.find(L"_win") != std::wstring::npos) return true;
+    if (vol.find(L"win_") != std::wstring::npos) return true;
+    return false;
+}
+
+static bool is_likely_linux_iso(const IsoSummary& sum, const ScanResult& scan) {
+    if (!scan.linuxFiles.empty()) return true;
+    std::wstring vol = ToLower(sum.volId + L" " + sum.sysId);
+    if (vol.find(L"ubuntu") != std::wstring::npos) return true;
+    if (vol.find(L"debian") != std::wstring::npos) return true;
+    if (vol.find(L"fedora") != std::wstring::npos) return true;
+    if (vol.find(L"linuxmint") != std::wstring::npos || vol.find(L"linux mint") != std::wstring::npos) return true;
+    if (vol.find(L"archlinux") != std::wstring::npos || vol.find(L"arch linux") != std::wstring::npos) return true;
+    if (vol.find(L"opensuse") != std::wstring::npos || vol.find(L"open suse") != std::wstring::npos) return true;
+    if (vol.find(L"centos") != std::wstring::npos) return true;
+    if (vol.find(L"clonezilla") != std::wstring::npos) return true;
+    return false;
+}
+
+static std::wstring linux_arch_from_text(const std::wstring& text) {
+    std::wstring t = ToLower(text);
+    if (t.find(L"amd64") != std::wstring::npos || t.find(L"x86_64") != std::wstring::npos) return L"x64";
+    if (t.find(L"i386") != std::wstring::npos || t.find(L"i686") != std::wstring::npos) return L"x86";
+    if (t.find(L"arm64") != std::wstring::npos || t.find(L"aarch64") != std::wstring::npos) return L"ARM64";
+    return L"";
+}
+
+static void enrich_linux_from_vol_id(const std::wstring& volId, LinuxInfo& linux) {
+    std::wstring v = trim_w(volId);
+    if (v.empty()) return;
+    std::wstring low = ToLower(v);
+    auto set_distro = [&](const wchar_t* name) {
+        linux.detected = true;
+        linux.distro = name;
+    };
+    if (low.find(L"ubuntu") != std::wstring::npos) set_distro(L"Ubuntu");
+    else if (low.find(L"debian") != std::wstring::npos) set_distro(L"Debian");
+    else if (low.find(L"fedora") != std::wstring::npos) set_distro(L"Fedora");
+    else if (low.find(L"linuxmint") != std::wstring::npos || low.find(L"linux mint") != std::wstring::npos)
+        set_distro(L"Linux Mint");
+    else if (low.find(L"archlinux") != std::wstring::npos) set_distro(L"Arch Linux");
+    else if (low.find(L"opensuse") != std::wstring::npos) set_distro(L"openSUSE");
+    else if (low.find(L"centos") != std::wstring::npos) set_distro(L"CentOS");
+    else if (low.find(L"clonezilla") != std::wstring::npos) set_distro(L"Clonezilla");
+    else return;
+
+    linux.arch = linux_arch_from_text(v);
+    size_t sp = v.find(L' ');
+    if (sp != std::wstring::npos && sp + 1 < v.size()) {
+        std::wstring rest = trim_w(v.substr(sp + 1));
+        std::wstring restLow = ToLower(rest);
+        size_t archPos = restLow.find(L" amd64");
+        if (archPos == std::wstring::npos) archPos = restLow.find(L" x86_64");
+        if (archPos == std::wstring::npos) archPos = restLow.find(L" i386");
+        if (archPos != std::wstring::npos)
+            linux.version = trim_w(rest.substr(0, archPos));
+        else
+            linux.version = rest;
+    }
+    if (low.find(L"desktop") != std::wstring::npos) linux.flavor = L"desktop";
+    else if (low.find(L"server") != std::wstring::npos) linux.flavor = L"server";
+    else if (low.find(L"live") != std::wstring::npos) linux.flavor = L"live";
+    if (low.find(L"lts") != std::wstring::npos && linux.version.find(L"LTS") == std::wstring::npos)
+        linux.version += L" LTS";
+}
+
+static void parse_dot_disk_info_text(const std::string& text, LinuxInfo& linux) {
+    std::istringstream ss(text);
+    std::string line;
+    while (std::getline(ss, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t')) line.pop_back();
+        if (line.empty() || line[0] == '#') {
+            if (line.size() > 1 && line[0] == '#') {
+                std::string content = line.substr(1);
+                while (!content.empty() && content[0] == ' ') content.erase(0, 1);
+                if (!content.empty()) line = content;
+                else continue;
+            }
+            else continue;
+        }
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, nullptr, 0);
+        if (wlen <= 0) continue;
+        std::wstring wline(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, line.c_str(), -1, &wline[0], wlen);
+        if (!wline.empty() && wline.back() == L'\0') wline.pop_back();
+        linux.diskInfoLine = wline;
+        enrich_linux_from_vol_id(wline, linux);
+        break;
+    }
+}
+
+static void fast_scan_linux_paths(FileReader& fr, const IsoSummary& sum, ScanResult& scan) {
+    static const wchar_t* kPaths[] = {
+        L"/.disk/info", L"/.disk/cd_type", L"/.disk/base_installable",
+        L"/casper/vmlinuz", L"/casper/filesystem.squashfs", L"/casper/filesystem.manifest",
+        L"/casper/install/filesystem.manifest",
+        L"/boot/grub/grub.cfg", L"/EFI/ubuntu/grubx64.efi",
+        L"/isolinux/isolinux.cfg", L"/live/filesystem.squashfs"
+    };
+
+    uint32_t rootLBA = sum.joliet ? sum.jolietRootLBA : sum.rootDirLBA;
+    uint32_t rootSize = sum.joliet ? sum.jolietRootSize : sum.rootDirSize;
+
+    auto add_if_found = [&](const IsoFileRef& ref) {
+        for (const auto& w : scan.linuxFiles) {
+            if (ToLower(w.path) == ToLower(ref.path)) return;
+        }
+        scan.linuxFiles.push_back(ref);
+        scan.totalFiles++;
+        std::wstring lp = ToLower(ref.path);
+        if (lp.find(L"grub") != std::wstring::npos) scan.foundGRUB2 = true;
+        if (lp.find(L"isolinux") != std::wstring::npos) scan.foundISOLINUX = true;
+        if (lp.find(L"/efi/ubuntu") != std::wstring::npos) {
+            scan.foundGRUB2 = true;
+            scan.foundEFI = true;
+        }
+        if (lp.find(L"/casper/") != std::wstring::npos) scan.foundEFI = true;
+    };
+
+    if (rootLBA && rootSize) {
+        for (const wchar_t* p : kPaths) {
+            IsoFileRef ref;
+            if (iso9660_find_path(fr, rootLBA, rootSize, sum.joliet, p, ref))
+                add_if_found(ref);
+        }
+    }
+    if (sum.hasUDF) {
+        for (const wchar_t* p : kPaths) {
+            IsoFileRef ref;
+            if (udf_resolve_path(fr, sum, p, ref))
+                add_if_found(ref);
+        }
+    }
+}
+
+static void analyze_linux_media(FileReader& fr, const ScanResult& scan, const IsoSummary& sum, LinuxInfo& linux) {
+    if (!is_likely_linux_iso(sum, scan)) return;
+    if (is_likely_microsoft_iso(sum, scan) && has_windows_install_evidence(scan)) return;
+
+    linux.detected = true;
+    enrich_linux_from_vol_id(sum.volId, linux);
+
+    const IsoFileRef* diskInfo = nullptr;
+    for (const auto& f : scan.linuxFiles) {
+        std::wstring lp = ToLower(f.path);
+        if (lp.find(L"/.disk/info") != std::wstring::npos) diskInfo = &f;
+        else if (lp.find(L"/casper/vmlinuz") != std::wstring::npos) linux.kernelPath = f.path;
+        else if (lp.find(L"filesystem.squashfs") != std::wstring::npos) linux.squashfsPath = f.path;
+        else if (lp.find(L"/casper/") != std::wstring::npos && linux.squashfsPath.empty())
+            linux.squashfsPath = f.path;
+    }
+
+    if (diskInfo && diskInfo->size > 0 && diskInfo->size < 64 * 1024) {
+        std::vector<uint8_t> buf((size_t)diskInfo->size);
+        if (read_iso_file_bytes(fr, diskInfo->lba, diskInfo->size, 0, buf.data(), (DWORD)diskInfo->size)) {
+            std::string text((const char*)buf.data(), (size_t)diskInfo->size);
+            parse_dot_disk_info_text(text, linux);
+        }
+    }
+
+    if (linux.distro.empty()) linux.distro = L"Linux";
+    if (linux.arch.empty()) linux.arch = linux_arch_from_text(sum.volId);
+    if (!linux.kernelPath.empty() || !linux.squashfsPath.empty()) {
+        linux.imageType = L"Live ISO (casper)";
+        if (linux.flavor.empty()) linux.flavor = L"desktop (live)";
+    }
+    else if (linux.flavor == L"server")
+        linux.imageType = L"Install ISO (server)";
+    else
+        linux.imageType = L"Linux ISO";
+}
+
 static void fast_scan_targeted(FileReader& fr, const IsoSummary& sum, ScanResult& scan) {
     static const wchar_t* kPaths[] = {
         L"/sources/install.esd", L"/sources/install.wim", L"/sources/boot.wim",
@@ -1488,12 +1703,8 @@ static void analyze_windows_media(FileReader& fr, const ScanResult& scan, Window
 
     const IsoFileRef* primary = installWim ? installWim : installEsd;
 
-    bool likelyMicrosoft = ToLower(sum.publisherId).find(L"microsoft") != std::wstring::npos
-        || ToLower(sum.volId).find(L"win") != std::wstring::npos
-        || ToLower(sum.appId).find(L"oscdimg") != std::wstring::npos
-        || sum.foundWinBootMgr || sum.biosBoot || sum.hasBootRecord;
-
-    if (!primary && !bootWim && scan.winFiles.empty() && !likelyMicrosoft) return;
+    if (!is_likely_microsoft_iso(sum, scan)) return;
+    if (is_likely_linux_iso(sum, scan) && !has_windows_install_evidence(scan)) return;
 
     win.detected = true;
     if (primary) {
@@ -1559,7 +1770,7 @@ static void analyze_windows_media(FileReader& fr, const ScanResult& scan, Window
         else if (volLow.find(L"x86") != std::wstring::npos) win.architecture = L"x86";
     }
 
-    if (win.editions.empty() && likelyMicrosoft && g_optFullScan) {
+    if (win.editions.empty() && is_likely_microsoft_iso(sum, scan) && g_optFullScan) {
         std::vector<WimDiscovery> discovered;
         discover_wim_by_signature_scan(fr, fr.size_bytes(), discovered);
         std::vector<WimImageInfo> installEditions, bootEditions;
@@ -2134,6 +2345,7 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
     }
     else {
         fast_scan_targeted(fr, sum, scan);
+        fast_scan_linux_paths(fr, sum, scan);
     }
 
     if (scan.rrDetected) sum.rockRidge = true;
@@ -2142,7 +2354,7 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
     sum.foundISOLINUX = scan.foundISOLINUX;
     sum.foundSyslinuxMenu = scan.foundSyslinuxMenu;
     sum.foundSystemdBoot = scan.foundSystemdBoot;
-    sum.foundWinBootMgr = scan.foundWinBootMgr || sum.uefiBoot;
+    sum.foundWinBootMgr = scan.foundWinBootMgr;
     sum.foundGenericEFI = scan.foundGenericEFI;
     if (!scan.configHits.empty()) sum.configHits = scan.configHits;
 
@@ -2154,6 +2366,8 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
     else if (sum.foundGenericEFI || sum.uefiBoot) sum.bootLoader = L"EFI (generic) ✨";
 
     WindowsInfo winInfo{};
+    LinuxInfo linuxInfo{};
+    analyze_linux_media(fr, scan, sum, linuxInfo);
     analyze_windows_media(fr, scan, winInfo, sum);
 
     QueryPerformanceCounter(&t1);
@@ -2234,7 +2448,17 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
     }
     if (!sum.volId.empty())
         txt << L"ISO label\t'" << sum.volId << L"'\r\n";
-    if (winInfo.detected) {
+    if (linuxInfo.detected) {
+        std::wstring detected = linuxInfo.distro;
+        if (!linuxInfo.version.empty()) detected += L" " + linuxInfo.version;
+        txt << L"Detected\t" << detected << L"\r\n";
+        if (!linuxInfo.arch.empty())
+            txt << L"Architecture\t" << linuxInfo.arch << L"\r\n";
+        if (sum.uefiBoot || !uefiBoots.empty()) txt << L"Uses\tEFI ✅\r\n";
+        if (sum.biosBoot || scan.foundISOLINUX) txt << L"Uses\tBIOS (isolinux/grub) ✅\r\n";
+        if (!linuxInfo.squashfsPath.empty()) txt << L"Uses\tLive-система (squashfs) ✅\r\n";
+    }
+    else if (winInfo.detected) {
         std::wstring detected = winInfo.productVersion;
         if (detected.empty()) detected = L"Windows";
         txt << L"Detected\t" << detected << L"\r\n";
@@ -2307,6 +2531,25 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
     else                               txt << L"Тип загрузки\t—\r\n";
 
     txt << L"Загрузчик\t" << (sum.bootLoader.empty() ? L"не обнаружен ❔" : sum.bootLoader) << L"\r\n";
+
+    if (linuxInfo.detected) {
+        txt << repeat(L'─', 90) << L"\r\n";
+        txt << L"🐧 Linux\t\r\n";
+        txt << L"Тип образа\t" << (linuxInfo.imageType.empty() ? L"Linux ISO" : linuxInfo.imageType) << L"\r\n";
+        txt << L"Дистрибутив\t" << linuxInfo.distro << L"\r\n";
+        if (!linuxInfo.version.empty())
+            txt << L"Версия\t" << linuxInfo.version << L"\r\n";
+        if (!linuxInfo.flavor.empty())
+            txt << L"Вариант\t" << linuxInfo.flavor << L"\r\n";
+        if (!linuxInfo.arch.empty())
+            txt << L"Архитектура\t" << linuxInfo.arch << L"\r\n";
+        if (!linuxInfo.diskInfoLine.empty())
+            txt << L".disk/info\t" << linuxInfo.diskInfoLine << L"\r\n";
+        if (!linuxInfo.kernelPath.empty())
+            txt << L"Ядро\t" << linuxInfo.kernelPath << L"\r\n";
+        if (!linuxInfo.squashfsPath.empty())
+            txt << L"Файловая система\t" << linuxInfo.squashfsPath << L"\r\n";
+    }
 
     if (winInfo.detected) {
         txt << repeat(L'─', 90) << L"\r\n";
