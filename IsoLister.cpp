@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <cwctype>
 #include <cstring>   // memcmp
+#include <set>
 
 // RichEdit
 #include <Richedit.h>
@@ -584,6 +585,350 @@ static std::wstring generate_disk_image_report(const wchar_t* FileToLoad, FileRe
 
     txt << repeat(L'─', 90) << L"\r\n";
     txt << L"ℹ️ Примечание\tЭто образ диска, не ISO9660. Анализ ISO/UDF внутри разделов не выполняется.\r\n";
+    return txt.str();
+}
+
+// -----------------------------------------------------------------------------
+// Apple Disk Image (UDIF / .dmg)
+// -----------------------------------------------------------------------------
+static uint16_t rd_be16(const uint8_t* p) {
+    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+}
+static uint32_t rd_be32(const uint8_t* p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+static uint64_t rd_be64(const uint8_t* p) {
+    return ((uint64_t)rd_be32(p) << 32) | rd_be32(p + 4);
+}
+
+static bool b64val(int c) {
+    if (c >= 'A' && c <= 'Z') return true;
+    if (c >= 'a' && c <= 'z') return true;
+    if (c >= '0' && c <= '9') return true;
+    return c == '+' || c == '/';
+}
+
+static bool base64_decode(const std::string& in, std::vector<uint8_t>& out) {
+    static const int8_t tbl[256] = {
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,62,-1,-1,-1,63,52,53,54,55,56,57,58,59,60,61,-1,-1,-1,-1,-1,-1,
+        -1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9,10,11,12,13,14,15,16,17,18,19,20,21,22,23,24,25,-1,-1,-1,-1,-1,
+        -1,26,27,28,29,30,31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,
+        -1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1,-1
+    };
+    out.clear();
+    uint32_t acc = 0;
+    int bits = 0;
+    for (unsigned char c : in) {
+        if (c == '=' || c == '\r' || c == '\n' || c == ' ' || c == '\t') continue;
+        if (!b64val(c)) return false;
+        acc = (acc << 6) | (uint32_t)tbl[c];
+        bits += 6;
+        if (bits >= 8) {
+            bits -= 8;
+            out.push_back((uint8_t)((acc >> bits) & 0xFF));
+        }
+    }
+    return !out.empty();
+}
+
+static std::wstring udif_chunk_type_name(uint32_t t) {
+    switch (t) {
+    case 0x00000000: return L"zero-fill";
+    case 0x00000001: return L"raw";
+    case 0x00000002: return L"ignored";
+    case 0x80000004: return L"adc";
+    case 0x80000005: return L"zlib";
+    case 0x80000006: return L"bzip2";
+    case 0x7ffffffe: return L"comment";
+    case 0xffffffff: return L"end";
+    default: {
+        wchar_t buf[16];
+        StringCchPrintfW(buf, 16, L"0x%08X", t);
+        return buf;
+    }
+    }
+}
+
+static std::wstring udif_format_label(const std::set<uint32_t>& types) {
+    if (types.count(0x80000006)) return L"UDBZ (bzip2)";
+    if (types.count(0x80000005)) return L"UDZO (zlib)";
+    if (types.count(0x80000004)) return L"UDCO (adc)";
+    if (types.count(0x00000001) && types.size() <= 2) return L"UDRO (raw)";
+    if (!types.empty()) return L"UDIF (mixed)";
+    return L"UDIF";
+}
+
+struct UdIfPartitionInfo {
+    std::wstring name;
+    uint64_t sectorCount = 0;
+    bool appleHfs = false;
+    bool appleApfs = false;
+    bool efi = false;
+    bool structural = false;
+};
+
+struct UdIfInfo {
+    bool valid = false;
+    uint32_t version = 0;
+    uint32_t flags = 0;
+    uint64_t dataForkLength = 0;
+    uint64_t xmlOffset = 0;
+    uint64_t xmlLength = 0;
+    uint64_t sectorCount = 0;
+    std::set<uint32_t> chunkTypes;
+    std::vector<UdIfPartitionInfo> partitions;
+    std::wstring hfsMountedVersion;
+    std::wstring macOsHint;
+};
+
+static std::wstring classify_udif_partition_name(const std::wstring& name, UdIfPartitionInfo& p) {
+    std::wstring n = name;
+    while (!n.empty() && (n.front() == L' ' || n.front() == L'\t')) n.erase(n.begin());
+    std::wstring low = ToLower(n);
+    p.structural = (low.find(L"gpt") != std::wstring::npos || low.find(L"mbr") != std::wstring::npos ||
+        low.find(L"driver descriptor") != std::wstring::npos || low.find(L"apple_free") != std::wstring::npos);
+    p.appleHfs = (low.find(L"apple_hfs") != std::wstring::npos || low.find(L"hfs :") != std::wstring::npos);
+    p.appleApfs = (low.find(L"apfs") != std::wstring::npos);
+    p.efi = (low.find(L"efi system") != std::wstring::npos || low.find(L"c12a7328") != std::wstring::npos);
+    return n;
+}
+
+static void udif_analyze_mish(const uint8_t* mish, size_t len, UdIfInfo& info) {
+    if (len < 0xCC + 40 || memcmp(mish, "mish", 4) != 0) return;
+    uint32_t nChunks = rd_be32(mish + 0xC8);
+    size_t off = 0xCC;
+    for (uint32_t c = 0; c < nChunks && off + 40 <= len; ++c) {
+        uint32_t et = rd_be32(mish + off);
+        uint64_t sn = rd_be64(mish + off + 8);
+        uint64_t sc = rd_be64(mish + off + 16);
+        uint64_t co = rd_be64(mish + off + 24);
+        (void)sc;
+        info.chunkTypes.insert(et);
+        if (et == 0x00000001 && sn <= 2 && 2 < sn + rd_be64(mish + off + 16)) {
+            (void)co;
+        }
+        off += 40;
+        if (et == 0xffffffff) break;
+    }
+}
+
+static bool udif_sniff_hfs_version(FileReader& fr, const UdIfInfo& info, const std::string& xml, std::wstring& outVer) {
+    size_t pos = 0;
+    while (true) {
+        size_t dpos = xml.find("<key>Data</key>", pos);
+        if (dpos == std::string::npos) break;
+        dpos = xml.find("<data>", dpos);
+        if (dpos == std::string::npos) break;
+        dpos += 6;
+        size_t dend = xml.find("</data>", dpos);
+        if (dend == std::string::npos) break;
+        std::vector<uint8_t> mish;
+        if (!base64_decode(xml.substr(dpos, dend - dpos), mish) || mish.size() < 0xCC + 40) {
+            pos = dend;
+            continue;
+        }
+        if (memcmp(mish.data(), "mish", 4) != 0) { pos = dend; continue; }
+        uint32_t nChunks = rd_be32(mish.data() + 0xC8);
+        size_t off = 0xCC;
+        for (uint32_t c = 0; c < nChunks && off + 40 <= mish.size(); ++c) {
+            uint32_t et = rd_be32(mish.data() + off);
+            uint64_t sn = rd_be64(mish.data() + off + 8);
+            uint64_t sc = rd_be64(mish.data() + off + 16);
+            uint64_t co = rd_be64(mish.data() + off + 24);
+            off += 40;
+            if (et != 0x00000001) continue;
+            if (sn > 2 || sn + sc <= 2) continue;
+            uint8_t vh[512];
+            uint64_t fileOff = co + (2 - sn) * 512;
+            if (!fr.read_at(fileOff, vh, 512)) continue;
+            if (rd_be16(vh) != 0x482B) continue;
+            char ver[5] = {};
+            memcpy(ver, vh + 8, 4);
+            bool ok = true;
+            for (int i = 0; i < 4; ++i) {
+                if (ver[i] && (ver[i] < 0x20 || ver[i] > 0x7E)) ok = false;
+            }
+            if (!ok) continue;
+            outVer = ATrimRight(std::string(ver, ver + strnlen(ver, 4)));
+            return true;
+        }
+        pos = dend;
+    }
+    return false;
+}
+
+static std::wstring macos_marketing_name(const std::wstring& ver, const wchar_t* path) {
+    std::wstring fn = path ? ToLower(path) : L"";
+    if (fn.find(L"catalina") != std::wstring::npos) return L"macOS Catalina (10.15)";
+    if (fn.find(L"bigsur") != std::wstring::npos || fn.find(L"big_sur") != std::wstring::npos) return L"macOS Big Sur (11)";
+    if (fn.find(L"monterey") != std::wstring::npos) return L"macOS Monterey (12)";
+    if (fn.find(L"ventura") != std::wstring::npos) return L"macOS Ventura (13)";
+    if (fn.find(L"sonoma") != std::wstring::npos) return L"macOS Sonoma (14)";
+    if (fn.find(L"sequoia") != std::wstring::npos) return L"macOS Sequoia (15)";
+    if (fn.find(L"tahoe") != std::wstring::npos) return L"macOS Tahoe (26)";
+    if (ver == L"10.15") return L"macOS Catalina";
+    if (ver == L"10.14") return L"macOS Mojave";
+    if (ver == L"10.13") return L"macOS High Sierra";
+    if (ver.rfind(L"11.", 0) == 0) return L"macOS Big Sur";
+    if (ver.rfind(L"12.", 0) == 0) return L"macOS Monterey";
+    if (ver.rfind(L"13.", 0) == 0) return L"macOS Ventura";
+    if (ver.rfind(L"14.", 0) == 0) return L"macOS Sonoma";
+    if (ver.rfind(L"15.", 0) == 0) return L"macOS Sequoia";
+    if (!ver.empty()) return L"macOS " + ver;
+    return L"macOS";
+}
+
+static std::wstring plist_extract_string(const std::string& block, const char* key) {
+    std::string needle = std::string("<key>") + key + "</key>";
+    size_t kpos = block.find(needle);
+    if (kpos == std::string::npos) return L"";
+    size_t spos = block.find("<string>", kpos);
+    if (spos == std::string::npos) return L"";
+    spos += 8;
+    size_t send = block.find("</string>", spos);
+    if (send == std::string::npos) return L"";
+    std::string utf8 = block.substr(spos, send - spos);
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, nullptr, 0);
+    if (wlen <= 1) return L"";
+    std::wstring w((size_t)wlen - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, utf8.c_str(), -1, &w[0], wlen);
+    return w;
+}
+
+static bool parse_udif_xml(const std::string& xml, UdIfInfo& info) {
+    size_t blkx = xml.find("<key>blkx</key>");
+    if (blkx == std::string::npos) return false;
+    size_t pos = blkx;
+    while (true) {
+        size_t dstart = xml.find("<dict>", pos);
+        if (dstart == std::string::npos) break;
+        size_t dend = xml.find("</dict>", dstart);
+        if (dend == std::string::npos) break;
+        std::string block = xml.substr(dstart, dend - dstart);
+        if (block.find("<key>Data</key>") == std::string::npos) {
+            pos = dend + 7;
+            continue;
+        }
+        std::wstring wname = plist_extract_string(block, "Name");
+        if (wname.empty()) wname = plist_extract_string(block, "CFName");
+        size_t dpos = block.find("<data>");
+        if (dpos == std::string::npos) { pos = dend + 7; continue; }
+        dpos += 6;
+        size_t dend2 = block.find("</data>", dpos);
+        if (dend2 == std::string::npos) { pos = dend + 7; continue; }
+        std::vector<uint8_t> mish;
+        if (base64_decode(block.substr(dpos, dend2 - dpos), mish) && mish.size() >= 24) {
+            UdIfPartitionInfo p{};
+            p.name = classify_udif_partition_name(wname, p);
+            p.sectorCount = rd_be64(mish.data() + 16);
+            udif_analyze_mish(mish.data(), mish.size(), info);
+            info.partitions.push_back(std::move(p));
+        }
+        pos = dend + 7;
+    }
+    return !info.partitions.empty();
+}
+
+static bool probe_udif_dmg(FileReader& fr, UdIfInfo& out, const wchar_t* pathForHints) {
+    uint64_t size = fr.size_bytes();
+    if (size < 1024) return false;
+    uint8_t koly[512];
+    if (!fr.read_at(size - 512, koly, 512) || memcmp(koly, "koly", 4) != 0) return false;
+
+    out.valid = true;
+    out.version = rd_be32(koly + 4);
+    out.flags = rd_be32(koly + 12);
+    out.dataForkLength = rd_be64(koly + 32);
+    out.xmlOffset = rd_be64(koly + 0xD8);
+    out.xmlLength = rd_be64(koly + 0xE0);
+    out.sectorCount = rd_be64(koly + 0x1EC);
+
+    if (!out.xmlLength || out.xmlLength > 16 * 1024 * 1024) return false;
+    if (out.xmlOffset >= size || out.xmlOffset + out.xmlLength > size) return false;
+
+    std::vector<char> xmlBuf((size_t)out.xmlLength + 1);
+    if (!fr.read_at(out.xmlOffset, xmlBuf.data(), (DWORD)out.xmlLength)) return false;
+    xmlBuf[(size_t)out.xmlLength] = '\0';
+    if (!parse_udif_xml(xmlBuf.data(), out)) return false;
+
+    udif_sniff_hfs_version(fr, out, xmlBuf.data(), out.hfsMountedVersion);
+    bool hasMacPart = false;
+    for (const auto& p : out.partitions) {
+        if (p.appleHfs || p.appleApfs) hasMacPart = true;
+    }
+    if (hasMacPart || !out.hfsMountedVersion.empty())
+        out.macOsHint = macos_marketing_name(out.hfsMountedVersion, pathForHints);
+    return true;
+}
+
+static std::wstring generate_udif_dmg_report(const wchar_t* FileToLoad, FileReader& fr, const UdIfInfo& dmg) {
+    std::wostringstream txt;
+    txt << L"🔌 IsoLister\tv" << ISO_LISTER_VERSION_WSTR << L" (" << ISO_LISTER_GIT_SHA_WSTR << L")\r\n";
+    txt << L"Сборка\t" << ISO_LISTER_BUILD_TIMESTAMP_WSTR << L"\r\n";
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"📄 Файл\t" << FileToLoad << L"\r\n";
+    txt << L"Размер файла\t" << FormatFileSize(fr.size_bytes()) << L"\r\n";
+    txt << L"Расширение\t" << GetFileExtensionLower(FileToLoad) << L"\r\n";
+    txt << L"Тип образа\t🍎 Apple Disk Image (UDIF .dmg)\r\n";
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"📀 UDIF\t\r\n";
+    txt << L"Формат\t" << udif_format_label(dmg.chunkTypes) << L" ✅\r\n";
+    txt << L"UDIF версия\t" << dmg.version << L"\r\n";
+    txt << L"Data fork\t" << FormatFileSize(dmg.dataForkLength) << L"\r\n";
+    txt << L"Развёрнутый размер\t" << FormatFileSize(dmg.sectorCount * 512) << L" (" << dmg.sectorCount << L" секторов)\r\n";
+    if (!dmg.chunkTypes.empty()) {
+        txt << L"Сжатие (типы блоков)\t";
+        bool first = true;
+        for (uint32_t t : dmg.chunkTypes) {
+            if (t == 0x7ffffffe || t == 0xffffffff) continue;
+            if (!first) txt << L", ";
+            txt << udif_chunk_type_name(t);
+            first = false;
+        }
+        txt << L"\r\n";
+    }
+
+    bool hasMac = false;
+    for (const auto& p : dmg.partitions) {
+        if (p.appleHfs || p.appleApfs) { hasMac = true; break; }
+    }
+    if (hasMac || !dmg.macOsHint.empty()) {
+        txt << repeat(L'─', 90) << L"\r\n";
+        txt << L"🍎 macOS\t\r\n";
+        txt << L"Тип образа\tУстановочный / recovery DMG\r\n";
+        if (!dmg.macOsHint.empty()) txt << L"Detected\t" << dmg.macOsHint << L"\r\n";
+        if (!dmg.hfsMountedVersion.empty())
+            txt << L"HFS+ lastMountedVersion\t" << dmg.hfsMountedVersion << L"\r\n";
+    }
+
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"🧱 Разделы (blkx)\t" << dmg.partitions.size() << L"\r\n";
+    int shown = 0;
+    for (const auto& p : dmg.partitions) {
+        if (p.structural) continue;
+        if (p.name.empty() && p.sectorCount <= 64) continue;
+        ++shown;
+        txt << L"📦\t" << (p.name.empty() ? L"(без имени)" : p.name);
+        if (p.sectorCount) txt << L" — " << FormatFileSize(p.sectorCount * 512);
+        if (p.appleHfs) txt << L" [HFS+]";
+        if (p.appleApfs) txt << L" [APFS]";
+        if (p.efi) txt << L" [EFI]";
+        txt << L"\r\n";
+    }
+    if (!shown) {
+        for (const auto& p : dmg.partitions) {
+            txt << L"📦\t" << (p.name.empty() ? L"(без имени)" : p.name);
+            if (p.sectorCount) txt << L" — " << FormatFileSize(p.sectorCount * 512);
+            txt << L"\r\n";
+        }
+    }
+
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"ℹ️ Примечание\tСодержимое сжатых блоков не распаковывается — показаны метаданные UDIF и разметка.\r\n";
     return txt.str();
 }
 
@@ -2574,10 +2919,13 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
 
     UINT detectedSector = DEFAULT_SECTOR_SIZE;
     if (!probe_iso_layout(fr, detectedSector)) {
+        UdIfInfo dmg;
+        if (probe_udif_dmg(fr, dmg, FileToLoad))
+            return generate_udif_dmg_report(FileToLoad, fr, dmg);
         DiskImageInfo disk;
         if (probe_disk_image(fr, disk))
             return generate_disk_image_report(FileToLoad, fr, disk);
-        txt << L"Ошибка\tНе обнаружена сигнатура ISO9660 (CD001) и разметка диска (MBR/GPT) ❌\r\n";
+        txt << L"Ошибка\tНе обнаружена сигнатура ISO9660, UDIF (.dmg) и разметка диска (MBR/GPT) ❌\r\n";
         txt << L"Размер файла\t" << FormatFileSize(fr.size_bytes()) << L"\r\n";
         txt << L"Расширение\t" << GetFileExtensionLower(FileToLoad) << L"\r\n";
         return txt.str();
@@ -3004,7 +3352,7 @@ extern "C" HWND __stdcall ListLoad(HWND ParentWin, char* FileToLoad, int ShowFla
 
 extern "C" void __stdcall ListGetDetectString(char* DetectString, int maxlen)
 {
-    StringCchCopyA(DetectString, (size_t)maxlen, "EXT=\"ISO\" EXT=\"IMG\"");
+    StringCchCopyA(DetectString, (size_t)maxlen, "EXT=\"ISO\" EXT=\"IMG\" EXT=\"DMG\"");
     log_line(L"ListGetDetectString called");
 }
 
@@ -3067,7 +3415,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     bool isIso = report.find(L"ISO 9660") != std::wstring::npos;
     bool isDisk = report.find(L"Образ диска") != std::wstring::npos;
-    if (!isIso && !isDisk) {
+    bool isDmg = report.find(L"Apple Disk Image") != std::wstring::npos;
+    if (!isIso && !isDisk && !isDmg) {
         fwprintf(stderr, L"VERIFY FAIL: unknown report type\n");
         return 1;
     }
@@ -3077,6 +3426,10 @@ int wmain(int argc, wchar_t** argv) {
     }
     if (isDisk && report.find(L"Разметка диска") == std::wstring::npos) {
         fwprintf(stderr, L"VERIFY FAIL: missing disk layout section\n");
+        return 1;
+    }
+    if (isDmg && report.find(L"UDIF") == std::wstring::npos) {
+        fwprintf(stderr, L"VERIFY FAIL: missing UDIF section\n");
         return 1;
     }
     fwprintf(stderr, L"VERIFY OK\n");
