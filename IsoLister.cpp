@@ -34,14 +34,7 @@ extern "C" {
 }
 #include "version_auto.h"  // генерируется gen_version.ps1
 
-#ifdef _M_IX86
-#pragma comment(linker, "/EXPORT:ListLoad=_ListLoad@12")
-#pragma comment(linker, "/EXPORT:ListLoadW=_ListLoadW@12")
-#pragma comment(linker, "/EXPORT:ListGetDetectString=_ListGetDetectString@8")
-#pragma comment(linker, "/EXPORT:ListCloseWindow=_ListCloseWindow@4")
-#pragma comment(linker, "/EXPORT:ListSetDefaultParams=_ListSetDefaultParams@4")
-#pragma comment(linker, "/EXPORT:ListSendCommand=_ListSendCommand@12")
-#else
+#ifndef _M_IX86
 #pragma comment(linker, "/EXPORT:ListLoad")
 #pragma comment(linker, "/EXPORT:ListLoadW")
 #pragma comment(linker, "/EXPORT:ListGetDetectString")

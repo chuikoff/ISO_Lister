@@ -1,12 +1,17 @@
 .vs/
 x64/
+Win32/
+Release/
 IsoLister/x64/
+IsoLister/Win32/
+IsoLister/Release/
 *.obj
 *.pdb
 *.ilk
 *.exp
 *.lib
 *.wlx64
+*.wlx
 *.dll
 *.aps
 *.res

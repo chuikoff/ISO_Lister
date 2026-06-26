@@ -14,13 +14,13 @@ WLX Lister-плагин для [Total Commander](https://www.ghisler.com/) — �
 
 ## Установка
 
-1. Скачайте `ISO_Lister_v1.1.0_wlx64.zip` из [релизов](https://github.com/chuikoff/ISO_Lister/releases).
+1. Скачайте архив из [релизов](https://github.com/chuikoff/ISO_Lister/releases) под вашу разрядность TC:
+   - **64-bit TC** → `ISO_Lister_*_wlx64.zip`
+   - **32-bit TC** → `ISO_Lister_*_wlx.zip`
 2. Откройте архив в Total Commander — TC предложит автоматическую установку (`pluginst.inf`).
    Либо вручную распакуйте в `%TOTALCMD%\Plugins\wlx\ISO_Lister\`.
 3. Перезапустите Total Commander.
 4. Откройте любой `.iso` и нажмите **F3** (Lister).
-
-Требуется **64-bit Total Commander** (Windows x64).
 
 ## Настройки
 
@@ -49,10 +49,16 @@ ShowBootEntries=0
 Требуется Visual Studio 2022 с компонентом «Desktop development with C++».
 
 ```bat
+REM 64-bit
 MSBuild IsoLister.sln /p:Configuration=Release /p:Platform=x64
+
+REM 32-bit
+MSBuild IsoLister.sln /p:Configuration=Release /p:Platform=x86
 ```
 
-Готовый плагин: `x64\Release\IsoLister.wlx64`
+Готовые плагины:
+- `x64\Release\IsoLister.wlx64`
+- `Release\IsoLister.wlx`
 
 Версия и git SHA встраиваются автоматически через `gen_version.ps1` (Pre-Build).
 
