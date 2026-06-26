@@ -19,6 +19,23 @@ WLX Lister-плагин для [Total Commander](https://www.ghisler.com/) — �
    - **64-bit TC** → `ISO_Lister_*_wlx64.zip`
    - **32-bit TC** → `ISO_Lister_*_wlx.zip`  
    Поддерживаются расширения: `.iso`, `.img`, `.dmg`
+
+### `.img` не открывается плагином (конфликт с Imagine / mthumbs)
+
+Total Commander считает `.img` **мультимедиа** (формат картинок в IrfanView/Imagine). Плагины с `MULTIMEDIA` в detect (mthumbs, Imagine, MMedia…) перехватывают F3 раньше, чем «голый» `EXT="IMG"`.
+
+**Что сделать:**
+
+1. Поднимите **IsoLister** в списке Lister-плагинов **выше** mthumbs/Imagine (лучше — на позицию 0).
+2. Detect string (уже в плагине v1.1.4+):
+
+   ```
+   EXT="ISO" | EXT="DMG" | (EXT="IMG" & [510]=85 & [511]=170) | (EXT="IMG" & [32769]=67 & [32770]=68 & [32771]=48 & [32772]=48 & [32773]=49) | (EXT="IMG" & SIZE>50000000)
+   ```
+
+   Это ловит MBR (55 AA), ISO9660 (CD001) и крупные образы (>50 МБ), но не маленькие `.img`-картинки.
+
+3. В **Imagine** / **mthumbs** сузьте detect — не используйте голый `MULTIMEDIA` без списка расширений, если мешает.
 2. Откройте архив в Total Commander — TC предложит автоматическую установку (`pluginst.inf`).
    Либо вручную распакуйте в `%TOTALCMD%\Plugins\wlx\ISO_Lister\`.
 3. Перезапустите Total Commander.

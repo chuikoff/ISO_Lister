@@ -3350,10 +3350,17 @@ extern "C" HWND __stdcall ListLoad(HWND ParentWin, char* FileToLoad, int ShowFla
     return ListLoadW(ParentWin, &w[0], ShowFlags);
 }
 
+// Detect: ISO/DMG по расширению; IMG — только образ диска/ISO, не GEM/графика (конфликт MULTIMEDIA).
+static const char kIsoListerDetectString[] =
+    "EXT=\"ISO\" | EXT=\"DMG\" | "
+    "(EXT=\"IMG\" & [510]=85 & [511]=170) | "
+    "(EXT=\"IMG\" & [32769]=67 & [32770]=68 & [32771]=48 & [32772]=48 & [32773]=49) | "
+    "(EXT=\"IMG\" & SIZE>50000000)";
+
 extern "C" void __stdcall ListGetDetectString(char* DetectString, int maxlen)
 {
-    StringCchCopyA(DetectString, (size_t)maxlen, "EXT=\"ISO\" EXT=\"IMG\" EXT=\"DMG\"");
-    log_line(L"ListGetDetectString called");
+    StringCchCopyA(DetectString, (size_t)maxlen, kIsoListerDetectString);
+    log_line(L"ListGetDetectString called: %hs", kIsoListerDetectString);
 }
 
 extern "C" void __stdcall ListCloseWindow(HWND ListWin)
