@@ -9,6 +9,7 @@ WLX Lister-плагин для [Total Commander](https://www.ghisler.com/) — �
 - **Быстрый режим по умолчанию** — анализ 2–4 ГБ ISO за ~100–150 мс (точечный поиск путей вместо полного обхода дерева)
 - **Windows** — UDF (современные установочные ISO), install.wim/esd, boot.wim, ei.cfg, издания, build, архитектура, подпись UEFI bootmgr
 - **Linux** — Ubuntu/Debian и др.: `/.disk/info`, casper, GRUB, ISOLINUX
+- **macOS** — Apple UDIF `.dmg`: разделы GPT, Apple_HFS/APFS, EFI, версия установщика
 - **ISO 9660** — Joliet, Rock Ridge, PVD/SVD, Boot Catalog
 - **RichEdit** — цветной отчёт с переносом строк (исправлен «белый экран» на Win8.1+)
 
@@ -16,7 +17,8 @@ WLX Lister-плагин для [Total Commander](https://www.ghisler.com/) — �
 
 1. Скачайте архив из [релизов](https://github.com/chuikoff/ISO_Lister/releases) под вашу разрядность TC:
    - **64-bit TC** → `ISO_Lister_*_wlx64.zip`
-   - **32-bit TC** → `ISO_Lister_*_wlx.zip`
+   - **32-bit TC** → `ISO_Lister_*_wlx.zip`  
+   Поддерживаются расширения: `.iso`, `.img`, `.dmg`
 2. Откройте архив в Total Commander — TC предложит автоматическую установку (`pluginst.inf`).
    Либо вручную распакуйте в `%TOTALCMD%\Plugins\wlx\ISO_Lister\`.
 3. Перезапустите Total Commander.
