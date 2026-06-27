@@ -1,47 +1,59 @@
 # IsoLister
 
-WLX Lister-плагин для [Total Commander](https://www.ghisler.com/) — быстрый анализ ISO-образов прямо в панели просмотра (F3), в духе Rufus.
+WLX Lister-плагин для [Total Commander](https://www.ghisler.com/) — быстрый анализ образов дисков прямо в панели просмотра (F3), в духе Rufus.
 
-Показывает тип файловой системы, загрузочность (El Torito), UEFI/BIOS, метаданные Windows и Linux, версию install.wim/esd, издания и многое другое.
+Показывает тип файловой системы, загрузочность (El Torito), UEFI/BIOS, метаданные Windows и Linux, версию install.wim/esd, издания, разметку raw-образов и структуру Apple UDIF — без полного монтирования.
+
+## Поддерживаемые форматы
+
+| Расширение | Тип | Что анализируется |
+|------------|-----|-------------------|
+| `.iso` | ISO 9660 / UDF | PVD/SVD, Joliet, Rock Ridge, El Torito, Windows/Linux-метаданные |
+| `.img` | Raw disk image | MBR/GPT, FAT/NTFS, разделы, загрузочные записи |
+| `.dmg` | Apple UDIF | koly, blkx, HFS+/APFS, GPT, версия установщика macOS |
 
 ## Возможности
 
-- **Быстрый режим по умолчанию** — анализ 2–4 ГБ ISO за ~100–150 мс (точечный поиск путей вместо полного обхода дерева)
-- **Windows** — UDF (современные установочные ISO), install.wim/esd, boot.wim, ei.cfg, издания, build, архитектура, подпись UEFI bootmgr
+- **Быстрый режим по умолчанию** — анализ ISO 2–4 ГБ за ~100–150 мс (точечный поиск путей вместо полного обхода дерева)
+- **Windows** — UDF, install.wim/esd, boot.wim, ei.cfg, издания, build, архитектура, подпись UEFI bootmgr
 - **Linux** — Ubuntu/Debian и др.: `/.disk/info`, casper, GRUB, ISOLINUX
 - **macOS** — Apple UDIF `.dmg`: разделы GPT, Apple_HFS/APFS, EFI, версия установщика
+- **Raw `.img`** — MBR/GPT, таблица разделов, сигнатуры FAT/NTFS, размер и смещения
 - **ISO 9660** — Joliet, Rock Ridge, PVD/SVD, Boot Catalog
 - **RichEdit** — цветной отчёт с переносом строк (исправлен «белый экран» на Win8.1+)
 
 ## Установка
 
-1. Скачайте архив из [релизов](https://github.com/chuikoff/ISO_Lister/releases) под вашу разрядность TC:
-   - **64-bit TC** → `ISO_Lister_*_wlx64.zip`
-   - **32-bit TC** → `ISO_Lister_*_wlx.zip`  
-   Поддерживаются расширения: `.iso`, `.img`, `.dmg`
+1. Скачайте архив из [релизов](https://github.com/chuikoff/ISO_Lister/releases) под разрядность Total Commander:
+   - **64-bit TC** → `ISO_Lister_v1.1.5_wlx64.zip`
+   - **32-bit TC** → `ISO_Lister_v1.1.5_wlx.zip`
+2. Откройте архив в Total Commander — TC предложит автоматическую установку (`pluginst.inf`).
+   Либо вручную распакуйте в `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
+3. **Перезапустите Total Commander.**
+4. Откройте `.iso`, `.img` или `.dmg` и нажмите **F3** (Lister).
 
-### `.img` не открывается плагином (конфликт с Imagine / mthumbs)
+Рекомендуется поставить IsoLister на **позицию 0** в списке Lister-плагинов (*Конфигурация → Плагины → Lister-плагины*).
 
-Total Commander помечает `.img` как **MULTIMEDIA** (картинки IrfanView/Imagine). Для таких файлов TC **не вызывает** плагины без `MULTIMEDIA` в detect — поэтому ISO/DMG работают, а IMG нет (даже на позиции 0).
+## `.img` и конфликт с Imagine / IrfanView
 
-**Решение (v1.1.5+):** в DLL и в `0_detect` для IMG обязателен `MULTIMEDIA &` (без него TC игнорирует плагин для `.img`):
+Total Commander помечает `.img` как **MULTIMEDIA** (картинки). Плагины без `MULTIMEDIA` в detect-строке для таких файлов **не вызываются** — поэтому ISO/DMG могут работать, а IMG нет.
+
+**В v1.1.5+** detect встроен в DLL:
 
 ```
 EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | (MULTIMEDIA & EXT="IMG")
 ```
 
-1. **IsoLister** — позиция **0** в Lister-плагинах; перезапустите TC после обновления DLL.
-2. В настройках плагина нажмите «По умолчанию» (подтянет строку из DLL) — **без кавычек** вокруг всей строки в INI.
-3. **Imagine** (#8): замените голый `MULTIMEDIA` на список расширений **без** `IMG`, иначе перехватывает образы диска.
-4. Лог плагина: `%TEMP%\IsoLister.log` — строка `ListLoadW: file=...Panasonic.img` означает, что плагин вызван.
-2. Откройте архив в Total Commander — TC предложит автоматическую установку (`pluginst.inf`).
-   Либо вручную распакуйте в `%TOTALCMD%\Plugins\wlx\ISO_Lister\`.
-3. Перезапустите Total Commander.
-4. Откройте любой `.iso` и нажмите **F3** (Lister).
+После обновления:
+
+1. Перезапустите TC.
+2. В настройках плагина нажмите **«По умолчанию»** (подтянет строку из DLL).
+3. Если Imagine стоит с голым `MULTIMEDIA` — сузьте detect до списка расширений **без** `IMG`, иначе он перехватывает образы диска.
+4. Лог: `%TEMP%\IsoLister.log` — строка `ListLoadW: file=...img` подтверждает вызов плагина.
 
 ## Настройки
 
-Секция `[IsoLister]` в `%APPDATA%\GHISLER\wincmd.ini` или `lsplugin.ini`:
+Секция `[IsoLister]` в `%APPDATA%\GHISLER\lsplugin.ini` (или `wincmd.ini`):
 
 | Параметр | По умолчанию | Описание |
 |----------|--------------|----------|
@@ -74,10 +86,17 @@ MSBuild IsoLister.sln /p:Configuration=Release /p:Platform=x86
 ```
 
 Готовые плагины:
+
 - `x64\Release\IsoLister.wlx64`
 - `Release\IsoLister.wlx`
 
 Версия и git SHA встраиваются автоматически через `gen_version.ps1` (Pre-Build).
+
+Упаковка релизного ZIP:
+
+```powershell
+.\installer\pack_release.ps1
+```
 
 ## Тесты
 

@@ -1,7 +1,7 @@
 [plugininstall]
-description=Fast ISO image analysis for Total Commander (Rufus-style) — 32-bit
-descriptionRUS=Быстрый анализ ISO-образов в Total Commander (как Rufus) — 32-bit
-version=1.1.1
+description=Fast ISO/IMG/DMG image analysis for Total Commander (Rufus-style) - 32-bit
+descriptionrus=Быстрый анализ ISO/IMG/DMG-образов в Total Commander (как Rufus) - 32-bit
+version=1.1.5
 type=wlx
 file=IsoLister.wlx
 defaultdir=ISO_Lister
