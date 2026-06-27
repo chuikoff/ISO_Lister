@@ -24,10 +24,8 @@ WLX Lister-плагин для [Total Commander](https://www.ghisler.com/) — �
 
 ## Установка
 
-1. Скачайте архив из [релизов](https://github.com/chuikoff/ISO_Lister/releases) под разрядность Total Commander:
-   - **64-bit TC** → `ISO_Lister_v1.1.5_wlx64.zip`
-   - **32-bit TC** → `ISO_Lister_v1.1.5_wlx.zip`
-2. Откройте архив в Total Commander — TC предложит автоматическую установку (`pluginst.inf`).
+1. Скачайте архив из [релизов](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.5.zip` (32- и 64-bit TC в одном пакете).
+2. Откройте архив в Total Commander — TC предложит автоматическую установку (`pluginst.inf`, нужный `.wlx`/`.wlx64` выбирается по разрядности TC).
    Либо вручную распакуйте в `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 3. **Перезапустите Total Commander.**
 4. Откройте `.iso`, `.img` или `.dmg` и нажмите **F3** (Lister).
