@@ -542,14 +542,8 @@ static bool probe_disk_image(FileReader& fr, DiskImageInfo& out) {
 
 static std::wstring generate_disk_image_report(const wchar_t* FileToLoad, FileReader& fr, const DiskImageInfo& disk) {
     std::wostringstream txt;
-    txt << L"🔌 IsoLister\tv" << ISO_LISTER_VERSION_WSTR << L" (" << ISO_LISTER_GIT_SHA_WSTR << L")\r\n";
-    txt << L"Сборка\t" << ISO_LISTER_BUILD_TIMESTAMP_WSTR << L"\r\n";
-    txt << repeat(L'─', 90) << L"\r\n";
-    txt << L"📄 Файл\t" << FileToLoad << L"\r\n";
-    txt << L"Размер файла\t" << FormatFileSize(fr.size_bytes()) << L"\r\n";
-    txt << L"Расширение\t" << GetFileExtensionLower(FileToLoad) << L"\r\n";
+    (void)FileToLoad;
     txt << L"Тип образа\t💽 Образ диска (raw sector dump)\r\n";
-    txt << L"Размер сектора\t512 байт\r\n";
     txt << repeat(L'─', 90) << L"\r\n";
     txt << L"🧱 Разметка диска\t" << (disk.gpt ? L"GPT ✅" : L"MBR ✅") << L"\r\n";
     if (disk.diskSignature)
@@ -867,12 +861,8 @@ static bool probe_udif_dmg(FileReader& fr, UdIfInfo& out, const wchar_t* pathFor
 
 static std::wstring generate_udif_dmg_report(const wchar_t* FileToLoad, FileReader& fr, const UdIfInfo& dmg) {
     std::wostringstream txt;
-    txt << L"🔌 IsoLister\tv" << ISO_LISTER_VERSION_WSTR << L" (" << ISO_LISTER_GIT_SHA_WSTR << L")\r\n";
-    txt << L"Сборка\t" << ISO_LISTER_BUILD_TIMESTAMP_WSTR << L"\r\n";
-    txt << repeat(L'─', 90) << L"\r\n";
-    txt << L"📄 Файл\t" << FileToLoad << L"\r\n";
-    txt << L"Размер файла\t" << FormatFileSize(fr.size_bytes()) << L"\r\n";
-    txt << L"Расширение\t" << GetFileExtensionLower(FileToLoad) << L"\r\n";
+    (void)FileToLoad;
+    (void)fr;
     txt << L"Тип образа\t🍎 Apple Disk Image (UDIF .dmg)\r\n";
     txt << repeat(L'─', 90) << L"\r\n";
     txt << L"📀 UDIF\t\r\n";
@@ -2903,10 +2893,6 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
     std::wostringstream txt;
     ScanResult scan{};
 
-    txt << L"🔌 IsoLister\tv" << ISO_LISTER_VERSION_WSTR << L" (" << ISO_LISTER_GIT_SHA_WSTR << L")\r\n";
-    txt << L"Сборка\t" << ISO_LISTER_BUILD_TIMESTAMP_WSTR << L"\r\n";
-    txt << repeat(L'─', 90) << L"\r\n";
-
     FileReader fr;
     IsoSummary sum;
     std::vector<uint8_t> sec(g_sectorSize);
@@ -2926,8 +2912,6 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
         if (probe_disk_image(fr, disk))
             return generate_disk_image_report(FileToLoad, fr, disk);
         txt << L"Ошибка\tНе обнаружена сигнатура ISO9660, UDIF (.dmg) и разметка диска (MBR/GPT) ❌\r\n";
-        txt << L"Размер файла\t" << FormatFileSize(fr.size_bytes()) << L"\r\n";
-        txt << L"Расширение\t" << GetFileExtensionLower(FileToLoad) << L"\r\n";
         return txt.str();
     }
     g_sectorSize = detectedSector;
@@ -3051,10 +3035,6 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
         }
     }
 
-    txt << L"📄 Файл\t" << FileToLoad << L"\r\n";
-    txt << L"Размер файла\t" << FormatFileSize(fr.size_bytes()) << L"\r\n";
-    txt << L"Расширение\t" << GetFileExtensionLower(FileToLoad) << L"\r\n";
-    txt << L"Размер сектора\t" << g_sectorSize << L" байт\r\n";
     txt << L"⏱ Время анализа\t" << (int)(scanMs + 0.5) << L" мс"
         << (g_optFullScan ? L" (полный скан)" : L" (быстрый режим)") << L"\r\n";
     txt << L"🗂 Тип ФС\t" << fsType << L"\r\n";
@@ -3417,8 +3397,8 @@ int wmain(int argc, wchar_t** argv) {
     }
     std::wstring report = generate_iso_report(argv[1]);
     fputws(report.c_str(), stdout);
-    if (report.find(L"IsoLister") == std::wstring::npos) {
-        fwprintf(stderr, L"VERIFY FAIL: missing 'IsoLister'\n");
+    if (report.empty()) {
+        fwprintf(stderr, L"VERIFY FAIL: empty report\n");
         return 1;
     }
     bool isIso = report.find(L"ISO 9660") != std::wstring::npos;
