@@ -35,14 +35,12 @@ extern "C" {
 }
 #include "version_auto.h"  // генерируется gen_version.ps1
 
-#ifndef _M_IX86
 #pragma comment(linker, "/EXPORT:ListLoad")
 #pragma comment(linker, "/EXPORT:ListLoadW")
 #pragma comment(linker, "/EXPORT:ListGetDetectString")
 #pragma comment(linker, "/EXPORT:ListCloseWindow")
 #pragma comment(linker, "/EXPORT:ListSetDefaultParams")
 #pragma comment(linker, "/EXPORT:ListSendCommand")
-#endif
 
 // -----------------------------------------------------------------------------
 // Логирование (в %TEMP%\IsoLister.log)
@@ -86,6 +84,10 @@ static const UINT IDM_CTX_SELECTALL = 2;
 static POINT RichEditContextPoint(HWND hwnd);
 static LRESULT CALLBACK RichEditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static void SubclassRichEdit(HWND hwnd);
+static void UnsubclassRichEdit(HWND hwnd);
+static void FitWindowToParentClient(HWND child, HWND parent);
+static HWND CreateRichEditView(HWND parent, DWORD style);
+static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact = false);
 
 static const UINT DEFAULT_SECTOR_SIZE = 2048;
 static const UINT VD_START_SECTOR = 16;
@@ -1265,9 +1267,13 @@ static bool read_iso_file_bytes(FileReader& fr, uint32_t lba, uint64_t fileSize,
     uint64_t offsetInFile, void* buf, DWORD size)
 {
     if (size == 0) return false;
+    if (size > 0x7FFFFFFF) return false;
     if (offsetInFile >= fileSize) return false;
-    if (offsetInFile + size > fileSize)
-        size = (DWORD)(fileSize - offsetInFile);
+    if (offsetInFile + size > fileSize) {
+        uint64_t avail = fileSize - offsetInFile;
+        if (avail > 0x7FFFFFFF) return false;
+        size = (DWORD)avail;
+    }
     uint64_t abs = (uint64_t)lba * g_sectorSize + offsetInFile;
     return fr.read_at(abs, buf, size);
 }
@@ -1408,6 +1414,9 @@ static bool parse_wim_xml_from_iso(FileReader& fr, uint32_t lba, uint64_t fileSi
     uint64_t xmlLen = rd_le64(hdr + 88);
     if (xmlLen == 0 || xmlLen > 32 * 1024 * 1024 || xmlOff + xmlLen > fileSize)
         return false;
+#ifdef _M_IX86
+    if (xmlLen > 16 * 1024 * 1024) return false;
+#endif
     std::vector<uint8_t> xmlBuf((size_t)xmlLen);
     if (!read_iso_file_bytes(fr, lba, fileSize, xmlOff, xmlBuf.data(), (DWORD)xmlLen))
         return false;
@@ -1517,7 +1526,11 @@ static bool wim_header_looks_valid(const uint8_t* hdr) {
 }
 
 static void discover_wim_by_signature_scan(FileReader& fr, uint64_t isoSize, std::vector<WimDiscovery>& out) {
+#ifdef _M_IX86
+    const uint64_t chunk = 8 * 1024 * 1024;
+#else
     const uint64_t chunk = 32 * 1024 * 1024;
+#endif
     const size_t step = 512;
     std::vector<uint8_t> buf((size_t)chunk + 256);
 
@@ -2790,18 +2803,16 @@ static LRESULT CALLBACK RichEditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
 
     }
 
+    case WM_SIZE: {
+        HWND parent = GetParent(hwnd);
+        if (parent) FitWindowToParentClient(hwnd, parent);
+        break;
+    }
+
     case WM_NCDESTROY: {
-
-        LRESULT result = CallWindowProcW(orig, hwnd, msg, wParam, lParam);
-
-        if (it != g_richWndProcMap.end()) {
-
-            g_richWndProcMap.erase(it);
-
-        }
-
-        return result;
-
+        WNDPROC saved = orig;
+        UnsubclassRichEdit(hwnd);
+        return CallWindowProcW(saved, hwnd, msg, wParam, lParam);
     }
 
     default:
@@ -2850,45 +2861,66 @@ static POINT RichEditContextPoint(HWND hwnd)
 
 
 
-static void SubclassRichEdit(HWND hwnd)
+static void UnsubclassRichEdit(HWND hwnd) {
+    auto it = g_richWndProcMap.find(hwnd);
+    if (it == g_richWndProcMap.end()) return;
+    WNDPROC orig = it->second;
+    g_richWndProcMap.erase(it);
+    if (IsWindow(hwnd))
+        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)orig);
+}
 
-{
+static void FitWindowToParentClient(HWND child, HWND parent) {
+    if (!IsWindow(child) || !IsWindow(parent)) return;
+    RECT rc{};
+    if (!GetClientRect(parent, &rc)) return;
+    int w = rc.right - rc.left;
+    int h = rc.bottom - rc.top;
+    if (w < 1) w = 1;
+    if (h < 1) h = 1;
+    MoveWindow(child, 0, 0, w, h, TRUE);
+}
 
+static HWND CreateRichEditView(HWND parent, DWORD style) {
+    static const wchar_t* kClasses[] = { MSFTEDIT_CLASS, L"RichEdit20W", nullptr };
+    for (int i = 0; kClasses[i]; ++i) {
+        const wchar_t* cls = kClasses[i];
+        if (cls == MSFTEDIT_CLASS) {
+            if (!g_hMsftEdit) g_hMsftEdit = LoadLibraryW(L"Msftedit.dll");
+            if (!g_hMsftEdit) continue;
+        }
+        else {
+            LoadLibraryW(L"Riched20.dll");
+        }
+        HWND h = CreateWindowExW(
+            WS_EX_CLIENTEDGE, cls, L"", style,
+            0, 0, 0, 0, parent, (HMENU)1, g_hInst, nullptr);
+        if (h) {
+            log_line(L"CreateRichEditView: class=%s ok", cls);
+            return h;
+        }
+        log_line(L"CreateRichEditView: class=%s failed err=%lu", cls, GetLastError());
+    }
+    return nullptr;
+}
+
+static void SubclassRichEdit(HWND hwnd) {
     if (!IsWindow(hwnd)) return;
-
     if (g_richWndProcMap.find(hwnd) != g_richWndProcMap.end()) return;
 
-
-
     SetLastError(0);
-
     WNDPROC old = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)RichEditSubclassProc);
-
-    if (!old) {
-
-        DWORD err = GetLastError();
-
-        if (err != 0) {
-
-            log_line(L"SetWindowLongPtrW(subclass) failed: %lu", err);
-
-        }
-
+    if (!old || old == RichEditSubclassProc) {
+        if (GetLastError() != 0)
+            log_line(L"SetWindowLongPtrW(subclass) failed: %lu", GetLastError());
         return;
-
     }
-
-    if (old != RichEditSubclassProc) {
-
-        g_richWndProcMap[hwnd] = old;
-
-    }
-
+    g_richWndProcMap[hwnd] = old;
 }
 
 
 
-static std::wstring generate_iso_report(const wchar_t* FileToLoad)
+static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
 {
     std::wostringstream txt;
     ScanResult scan{};
@@ -3078,6 +3110,26 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
             txt << L"Uses\t" << installName << L" (version " << wimVersion << L") ✅\r\n";
         }
     }
+
+    if (compact) {
+        if (sum.biosBoot && sum.uefiBoot) txt << L"Тип загрузки\tBIOS и UEFI\r\n";
+        else if (sum.biosBoot)            txt << L"Тип загрузки\tBIOS\r\n";
+        else if (sum.uefiBoot)            txt << L"Тип загрузки\tUEFI\r\n";
+        if (!sum.bootLoader.empty())
+            txt << L"Загрузчик\t" << sum.bootLoader << L"\r\n";
+        if (winInfo.detected && !winInfo.editions.empty()) {
+            txt << repeat(L'─', 90) << L"\r\n";
+            txt << L"Редакции (WIM)\t" << (int)winInfo.editions.size() << L" образ(ов)\r\n";
+            for (const auto& ed : winInfo.editions) {
+                txt << ed.index << L"\t"
+                    << (ed.displayName.empty() ? ed.name : ed.displayName) << L"\t"
+                    << (ed.editionId.empty() ? L"—" : ed.editionId) << L"\t"
+                    << (ed.version.empty() ? L"—" : ed.version) << L"\r\n";
+            }
+        }
+        return txt.str();
+    }
+
     if (sum.hasPVD) {
         double MB = (double)sum.volBlocks * sum.logicalBlockSize / (1024.0 * 1024.0);
         txt << L"System ID\t" << sum.sysId << L"\r\n";
@@ -3266,33 +3318,37 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
 
 extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowFlags)
 {
-    log_line(L"ListLoadW: file=\"%s\" flags=%d", FileToLoad ? FileToLoad : L"(null)", ShowFlags);
+    log_line(L"ListLoadW: file=\"%s\" flags=%d parent=%p", FileToLoad ? FileToLoad : L"(null)", ShowFlags, ParentWin);
 
-    std::wstring text = generate_iso_report(FileToLoad);
-    sanitize_wstring_for_richedit(text);
-    log_line(L"ListLoadW: report chars=%u", (unsigned)text.size());
-
-    bool wrapText = (ShowFlags & lcp_wraptext) != 0;
-    DWORD reStyle = WS_CHILD | WS_VISIBLE | WS_VSCROLL |
-        ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | ES_WANTRETURN;
-    if (!wrapText) reStyle |= WS_HSCROLL | ES_AUTOHSCROLL;
-
-    HWND hRE = CreateWindowExW(
-        WS_EX_CLIENTEDGE,
-        MSFTEDIT_CLASS,
-        L"",
-        reStyle,
-        0, 0, 0, 0,
-        ParentWin,
-        (HMENU)1,
-        g_hInst,
-        nullptr
-    );
-    if (!hRE) {
-        log_line(L"CreateWindowExW(RICHEDIT50W) FAILED, GetLastError=%lu", GetLastError());
+    if (!ParentWin || !IsWindow(ParentWin)) {
+        log_line(L"ListLoadW: invalid parent window");
         return nullptr;
     }
 
+    bool quickView = (ShowFlags & lcp_fittowindow) != 0;
+    std::wstring text;
+    try {
+        text = generate_iso_report(FileToLoad, quickView);
+    }
+    catch (...) {
+        log_line(L"ListLoadW: generate_iso_report exception");
+        text = L"Ошибка\tНе удалось сформировать отчёт ❌\r\n";
+    }
+    sanitize_wstring_for_richedit(text);
+    log_line(L"ListLoadW: report chars=%u quickView=%d", (unsigned)text.size(), quickView ? 1 : 0);
+
+    bool wrapText = (ShowFlags & lcp_wraptext) != 0;
+    DWORD reStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
+        ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | ES_WANTRETURN;
+    if (!wrapText) reStyle |= WS_HSCROLL | ES_AUTOHSCROLL;
+
+    HWND hRE = CreateRichEditView(ParentWin, reStyle);
+    if (!hRE) {
+        log_line(L"ListLoadW: CreateRichEditView FAILED");
+        return nullptr;
+    }
+
+    FitWindowToParentClient(hRE, ParentWin);
     SubclassRichEdit(hRE);
 
     if (g_hMonoFont) SendMessageW(hRE, WM_SETFONT, (WPARAM)g_hMonoFont, TRUE);
@@ -3346,8 +3402,14 @@ extern "C" void __stdcall ListGetDetectString(char* DetectString, int maxlen)
 
 extern "C" void __stdcall ListCloseWindow(HWND ListWin)
 {
-    if (IsWindow(ListWin)) DestroyWindow(ListWin);
-    log_line(L"ListCloseWindow");
+    log_line(L"ListCloseWindow hwnd=%p", ListWin);
+    if (!ListWin) return;
+    if (!IsWindow(ListWin)) {
+        g_richWndProcMap.erase(ListWin);
+        return;
+    }
+    UnsubclassRichEdit(ListWin);
+    DestroyWindow(ListWin);
 }
 
 extern "C" int __stdcall ListSendCommand(HWND ListWin, int Command, int Parameter)
@@ -3395,7 +3457,7 @@ int wmain(int argc, wchar_t** argv) {
         fwprintf(stderr, L"Usage: %s <path-to-iso-or-img>\n", argv[0]);
         return 2;
     }
-    std::wstring report = generate_iso_report(argv[1]);
+    std::wstring report = generate_iso_report(argv[1], false);
     fputws(report.c_str(), stdout);
     if (report.empty()) {
         fwprintf(stderr, L"VERIFY FAIL: empty report\n");
