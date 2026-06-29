@@ -2975,10 +2975,6 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
     uint32_t rootLBA = sum.joliet ? sum.jolietRootLBA : sum.rootDirLBA;
     uint32_t rootSize = sum.joliet ? sum.jolietRootSize : sum.rootDirSize;
 
-    LARGE_INTEGER t0{}, t1{}, freq{};
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t0);
-
     if (g_optFullScan) {
         if (rootLBA && rootSize)
             scan = bfs_scan(fr, rootLBA, rootSize, sum.joliet, g_optDepth, g_optMaxNodes);
@@ -3011,9 +3007,6 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
     LinuxInfo linuxInfo{};
     analyze_linux_media(fr, scan, sum, linuxInfo);
     analyze_windows_media(fr, scan, winInfo, sum);
-
-    QueryPerformanceCounter(&t1);
-    double scanMs = (double)(t1.QuadPart - t0.QuadPart) * 1000.0 / (double)freq.QuadPart;
 
     std::wstring wimVersion;
     const IsoFileRef* installRef = nullptr;
@@ -3067,8 +3060,6 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         }
     }
 
-    txt << L"⏱ Время анализа\t" << (int)(scanMs + 0.5) << L" мс"
-        << (g_optFullScan ? L" (полный скан)" : L" (быстрый режим)") << L"\r\n";
     txt << L"🗂 Тип ФС\t" << fsType << L"\r\n";
 
     txt << repeat(L'─', 90) << L"\r\n";
