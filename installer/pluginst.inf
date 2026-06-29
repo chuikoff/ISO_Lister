@@ -1,7 +1,7 @@
 [plugininstall]
-description=Fast ISO/IMG/DMG image analysis for Total Commander (Rufus-style)
-descriptionrus=Быстрый анализ ISO/IMG/DMG-образов в Total Commander (как Rufus)
-version=1.1.5
+description=IsoLister — fast ISO/IMG/DMG analysis in Total Commander (F3/Ctrl+Q). Windows WIM editions, Linux distro, UEFI/BIOS boot, MBR/GPT, Apple UDIF. No mount required. 32+64-bit.
+descriptionrus=IsoLister — быстрый анализ ISO/IMG/DMG в Total Commander (F3/Ctrl+Q). Редакции Windows из WIM, Linux, UEFI/BIOS, MBR/GPT, Apple UDIF. Без монтирования. 32+64-bit.
+version=1.1.6
 type=wlx
 file=IsoLister.wlx
 file64=IsoLister.wlx64
