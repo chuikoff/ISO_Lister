@@ -64,8 +64,10 @@ Total Commander классифицирует `.img` как **MULTIMEDIA** (ка�
 Detect-строка в DLL (v1.1.5+):
 
 ```
-EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | (MULTIMEDIA & EXT="IMG")
+EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | (MULTIMEDIA & EXT="IMG" & SIZE>50000000)
 ```
+
+Сигнатуры: MBR `55 AA`, ISO9660 `CD001`, либо размер > 50 МБ. Голый `EXT="IMG"` не используется (картинки GEM/Imagine).
 
 Если `.img` не открывается:
 1. Перезапустите TC, в настройках плагина нажмите **«По умолчанию»**.
@@ -169,8 +171,10 @@ Total Commander treats `.img` as **MULTIMEDIA** (images). Plugins without `MULTI
 Built-in detect (v1.1.5+):
 
 ```
-EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | (MULTIMEDIA & EXT="IMG")
+EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | (MULTIMEDIA & EXT="IMG" & SIZE>50000000)
 ```
+
+Signatures: MBR `55 AA`, ISO9660 `CD001`, or size > 50 MB. Bare `EXT="IMG"` is not used (GEM/Imagine pictures).
 
 If `.img` does not open:
 1. Restart TC; in plugin settings click **Default** to reload detect from DLL.

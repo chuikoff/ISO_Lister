@@ -91,8 +91,9 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact 
 
 static const UINT DEFAULT_SECTOR_SIZE = 2048;
 static const UINT VD_START_SECTOR = 16;
+static const uint32_t kMaxVolumeDescriptors = 64;
 static const size_t MAX_DIR_READ = 16 * 1024 * 1024;
-static UINT g_sectorSize = DEFAULT_SECTOR_SIZE;
+static const size_t kMaxSmallTextFile = 64 * 1024;
 
 // Опции (по умолчанию — быстрый режим как Rufus)
 static int g_optDepth = 6;
@@ -177,20 +178,43 @@ static std::wstring GetFileExtensionLower(const wchar_t* path) {
 // -----------------------------------------------------------------------------
 struct FileReader {
     HANDLE h = INVALID_HANDLE_VALUE;
+    UINT sectorSize = DEFAULT_SECTOR_SIZE;
+
+    FileReader() = default;
+    FileReader(const FileReader&) = delete;
+    FileReader& operator=(const FileReader&) = delete;
+    FileReader(FileReader&& o) noexcept : h(o.h), sectorSize(o.sectorSize) {
+        o.h = INVALID_HANDLE_VALUE;
+    }
+    FileReader& operator=(FileReader&& o) noexcept {
+        if (this != &o) {
+            if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+            h = o.h;
+            sectorSize = o.sectorSize;
+            o.h = INVALID_HANDLE_VALUE;
+        }
+        return *this;
+    }
+
     bool open(const wchar_t* path) {
+        if (h != INVALID_HANDLE_VALUE) {
+            CloseHandle(h);
+            h = INVALID_HANDLE_VALUE;
+        }
         h = CreateFileW(path, GENERIC_READ,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
             nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         return h != INVALID_HANDLE_VALUE;
     }
     bool read_at(uint64_t off, void* buf, DWORD size) {
-        LARGE_INTEGER li; li.QuadPart = off;
+        if (h == INVALID_HANDLE_VALUE || !buf || size == 0) return false;
+        LARGE_INTEGER li; li.QuadPart = (LONGLONG)off;
         if (!SetFilePointerEx(h, li, nullptr, FILE_BEGIN)) return false;
         DWORD rd = 0;
         return ReadFile(h, buf, size, &rd, nullptr) && rd == size;
     }
     bool read_sector(uint32_t lba, void* buf, DWORD size) {
-        return read_at(uint64_t(lba) * g_sectorSize, buf, size);
+        return read_at(uint64_t(lba) * sectorSize, buf, size);
     }
     uint64_t size_bytes() const {
         LARGE_INTEGER li{};
@@ -302,6 +326,7 @@ static bool probe_iso_layout(FileReader& fr, UINT& sectorSizeOut) {
         if (!fr.read_at(off, hdr, toRead)) continue;
         if (is_cd001(hdr)) {
             sectorSizeOut = ss;
+            fr.sectorSize = ss;
             return true;
         }
     }
@@ -1054,10 +1079,10 @@ static bool parse_udf_dstring(const uint8_t* p, int maxChars, std::wstring& out)
 }
 
 static int detect_udf_nsr(FileReader& fr) {
-    std::vector<uint8_t> buf(g_sectorSize);
+    std::vector<uint8_t> buf(fr.sectorSize);
     for (uint32_t s = VD_START_SECTOR; s < VD_START_SECTOR + 256; ++s) {
-        if (!fr.read_sector(s, buf.data(), g_sectorSize)) break;
-        for (size_t i = 0; i + 5 <= g_sectorSize; i++) {
+        if (!fr.read_sector(s, buf.data(), fr.sectorSize)) break;
+        for (size_t i = 0; i + 5 <= fr.sectorSize; i++) {
             if (!memcmp(buf.data() + i, "NSR03", 5)) return 3;
             if (!memcmp(buf.data() + i, "NSR02", 5)) return 2;
         }
@@ -1072,7 +1097,7 @@ static bool parse_udf(FileReader& fr, IsoSummary& out) {
     out.hasUDF = true;
     out.udfNsrVersion = nsr;
 
-    uint64_t totalSectors = fr.size_bytes() / g_sectorSize;
+    uint64_t totalSectors = fr.size_bytes() / fr.sectorSize;
     if (totalSectors < 257) return true;
 
     uint32_t anchorSecs[3] = {
@@ -1084,7 +1109,7 @@ static bool parse_udf(FileReader& fr, IsoSummary& out) {
     uint32_t mvdsExtent = 0, mvdsLen = 0;
     for (uint32_t as : anchorSecs) {
         uint8_t tag[512]{};
-        if (!fr.read_sector(as, tag, (DWORD)std::min<size_t>(512, g_sectorSize))) continue;
+        if (!fr.read_sector(as, tag, (DWORD)std::min<size_t>(512, fr.sectorSize))) continue;
         if (!udf_tag_valid(tag)) continue;
         if (rd_le16(tag) != 2) continue;
         mvdsExtent = rd_le32(tag + 16);
@@ -1197,7 +1222,7 @@ static void read_directory(FileReader& fr, uint32_t lba, uint32_t size, bool jol
     while (off + 1 < buf.size()) {
         uint8_t len_dr = buf[off];
         if (len_dr == 0) {
-            size_t next = ((off / g_sectorSize) + 1) * g_sectorSize;
+            size_t next = ((off / fr.sectorSize) + 1) * fr.sectorSize;
             if (next <= off) break;
             off = next;
             continue;
@@ -1274,7 +1299,7 @@ static bool read_iso_file_bytes(FileReader& fr, uint32_t lba, uint64_t fileSize,
         if (avail > 0x7FFFFFFF) return false;
         size = (DWORD)avail;
     }
-    uint64_t abs = (uint64_t)lba * g_sectorSize + offsetInFile;
+    uint64_t abs = (uint64_t)lba * fr.sectorSize + offsetInFile;
     return fr.read_at(abs, buf, size);
 }
 
@@ -1534,7 +1559,7 @@ static void discover_wim_by_signature_scan(FileReader& fr, uint64_t isoSize, std
     const size_t step = 512;
     std::vector<uint8_t> buf((size_t)chunk + 256);
 
-    for (uint64_t base = 34ULL * g_sectorSize; base < isoSize; base += chunk) {
+    for (uint64_t base = 34ULL * fr.sectorSize; base < isoSize; base += chunk) {
         uint64_t toRead = std::min<uint64_t>(chunk + 256, isoSize - base);
         if (!fr.read_at(base, buf.data(), (DWORD)toRead)) break;
 
@@ -1770,13 +1795,13 @@ static bool udf_read_long_ad(const uint8_t* p, uint32_t& lba, uint32_t& len) {
 static bool udf_fe_data_extent(FileReader& fr, uint32_t partBase, uint32_t feLba,
     uint32_t& dataLba, uint32_t& dataLen, uint64_t* infoLen = nullptr)
 {
-    std::vector<uint8_t> fe(g_sectorSize);
-    if (!fr.read_sector(partBase + feLba, fe.data(), g_sectorSize)) return false;
+    std::vector<uint8_t> fe(fr.sectorSize);
+    if (!fr.read_sector(partBase + feLba, fe.data(), fr.sectorSize)) return false;
     if (!udf_tag_ok(fe.data()) || rd_le16(fe.data()) != 261) return false;
     if (infoLen) *infoLen = rd_le64(fe.data() + 56);
     uint32_t lEa = rd_le32(fe.data() + 168);
     uint32_t lAd = rd_le32(fe.data() + 172);
-    if (176 + lEa + 8 > g_sectorSize) return false;
+    if (176 + lEa + 8 > fr.sectorSize) return false;
     const uint8_t* ad = fe.data() + 176 + ((lEa + 3) & ~3u);
     if (lAd >= 16 && udf_read_long_ad(ad, dataLba, dataLen)) return true;
     if (lAd >= 8 && udf_read_short_ad(ad, dataLba, dataLen)) return true;
@@ -1836,7 +1861,7 @@ static void udf_scan_directory(FileReader& fr, uint32_t partBase, uint32_t dirLb
         uint64_t infoLen = 0, fileSize = 0;
         if (isDir) {
             if (!udf_fe_data_extent(fr, partBase, icbLba, dataLba, dataLen))
-            { dataLba = icbLba; dataLen = icbLen ? icbLen : g_sectorSize; }
+            { dataLba = icbLba; dataLen = icbLen ? icbLen : fr.sectorSize; }
         }
         else {
             if (!udf_fe_data_extent(fr, partBase, icbLba, dataLba, dataLen, &infoLen))
@@ -1882,8 +1907,8 @@ static bool udf_locate_root(FileReader& fr, const IsoSummary& sum, uint32_t& par
 {
     auto try_fsd_in_sector = [&](uint32_t s, uint32_t pBase) -> bool {
         uint8_t sec[2048]{};
-        if (!fr.read_sector(s, sec, g_sectorSize)) return false;
-        for (size_t base = 0; base + 416 <= g_sectorSize; base += 4) {
+        if (!fr.read_sector(s, sec, fr.sectorSize)) return false;
+        for (size_t base = 0; base + 416 <= fr.sectorSize; base += 4) {
             if (!udf_tag_ok(sec + base) || rd_le16(sec + base) != 256) continue;
             uint32_t icbLba = 0, icbLen = 0;
             if (!udf_read_long_ad(sec + base + 400, icbLba, icbLen) || !icbLba) continue;
@@ -1891,7 +1916,7 @@ static bool udf_locate_root(FileReader& fr, const IsoSummary& sum, uint32_t& par
             if (udf_fe_data_extent(fr, partBase, icbLba, rootLba, rootLen))
                 return rootLba != 0;
             rootLba = icbLba;
-            rootLen = icbLen ? icbLen : g_sectorSize;
+            rootLen = icbLen ? icbLen : fr.sectorSize;
             return true;
         }
         return false;
@@ -1903,7 +1928,7 @@ static bool udf_locate_root(FileReader& fr, const IsoSummary& sum, uint32_t& par
             if (try_fsd_in_sector(s, sum.udfPartitionStart)) return true;
     }
 
-    uint64_t totalSectors = fr.size_bytes() / g_sectorSize;
+    uint64_t totalSectors = fr.size_bytes() / fr.sectorSize;
     uint32_t msEnd = (uint32_t)std::min<uint64_t>(4096, totalSectors);
     for (uint32_t s = 256; s < msEnd; ++s)
         if (try_fsd_in_sector(s, 0)) return true;
@@ -1918,7 +1943,7 @@ static bool udf_find_child(FileReader& fr, uint32_t partBase, uint32_t dirLba, u
 {
     std::wstring want = ToLower(childName);
     size_t toRead = (size_t)std::min<uint32_t>(dirLen, 4 * 1024 * 1024);
-    if (toRead == 0) toRead = g_sectorSize;
+    if (toRead == 0) toRead = fr.sectorSize;
     std::vector<uint8_t> buf(toRead);
     if (!fr.read_sector(partBase + dirLba, buf.data(), (DWORD)toRead)) return false;
 
@@ -1951,7 +1976,7 @@ static bool udf_find_child(FileReader& fr, uint32_t partBase, uint32_t dirLba, u
         if (entryIsDir) {
             if (!udf_fe_data_extent(fr, partBase, icbLba, outLba, outLen)) {
                 outLba = icbLba;
-                outLen = icbLen ? icbLen : g_sectorSize;
+                outLen = icbLen ? icbLen : fr.sectorSize;
             }
             outSize = 0;
             return true;
@@ -1990,7 +2015,7 @@ static bool udf_resolve_path(FileReader& fr, const IsoSummary& sum, const wchar_
             return true;
         }
         curLba = nextLba;
-        curLen = nextLen ? nextLen : g_sectorSize;
+        curLen = nextLen ? nextLen : fr.sectorSize;
     }
     return false;
 }
@@ -2240,10 +2265,11 @@ static void analyze_linux_media(FileReader& fr, const ScanResult& scan, const Is
             linux.squashfsPath = f.path;
     }
 
-    if (diskInfo && diskInfo->size > 0 && diskInfo->size < 64 * 1024) {
-        std::vector<uint8_t> buf((size_t)diskInfo->size);
-        if (read_iso_file_bytes(fr, diskInfo->lba, diskInfo->size, 0, buf.data(), (DWORD)diskInfo->size)) {
-            std::string text((const char*)buf.data(), (size_t)diskInfo->size);
+    if (diskInfo && diskInfo->size > 0) {
+        size_t n = (size_t)std::min<uint64_t>(diskInfo->size, kMaxSmallTextFile);
+        std::vector<uint8_t> buf(n);
+        if (read_iso_file_bytes(fr, diskInfo->lba, diskInfo->size, 0, buf.data(), (DWORD)n)) {
+            std::string text((const char*)buf.data(), n);
             parse_dot_disk_info_text(text, linux);
         }
     }
@@ -2349,10 +2375,11 @@ static void analyze_windows_media(FileReader& fr, const ScanResult& scan, Window
         win.bootImageSize = bootWim->size;
     }
 
-    if (eiCfg && eiCfg->size > 0 && eiCfg->size < 1024 * 1024) {
-        std::vector<uint8_t> buf((size_t)eiCfg->size);
-        if (read_iso_file_bytes(fr, eiCfg->lba, eiCfg->size, 0, buf.data(), (DWORD)eiCfg->size)) {
-            std::string text((const char*)buf.data(), (size_t)eiCfg->size);
+    if (eiCfg && eiCfg->size > 0) {
+        size_t n = (size_t)std::min<uint64_t>(eiCfg->size, kMaxSmallTextFile);
+        std::vector<uint8_t> buf(n);
+        if (read_iso_file_bytes(fr, eiCfg->lba, eiCfg->size, 0, buf.data(), (DWORD)n)) {
+            std::string text((const char*)buf.data(), n);
             parse_ei_cfg_text(text, win);
         }
     }
@@ -2475,12 +2502,12 @@ static bool parse_boot_catalog(FileReader& fr, uint32_t catalogLBA,
     valid = false; hasBIOS = false; hasUEFI = false;
     if (catalogLBA == 0) return false;
 
-    const int MAX_CATSZ = (int)g_sectorSize * 4;
+    const int MAX_CATSZ = (int)fr.sectorSize * 4;
     std::vector<uint8_t> buf(MAX_CATSZ, 0);
-    if (!fr.read_sector(catalogLBA, buf.data(), g_sectorSize)) return false;
-    fr.read_sector(catalogLBA + 1, buf.data() + g_sectorSize, g_sectorSize);
-    fr.read_sector(catalogLBA + 2, buf.data() + 2 * g_sectorSize, g_sectorSize);
-    fr.read_sector(catalogLBA + 3, buf.data() + 3 * g_sectorSize, g_sectorSize);
+    if (!fr.read_sector(catalogLBA, buf.data(), fr.sectorSize)) return false;
+    fr.read_sector(catalogLBA + 1, buf.data() + fr.sectorSize, fr.sectorSize);
+    fr.read_sector(catalogLBA + 2, buf.data() + 2 * fr.sectorSize, fr.sectorSize);
+    fr.read_sector(catalogLBA + 3, buf.data() + 3 * fr.sectorSize, fr.sectorSize);
 
     const uint8_t* val = buf.data();
     if (val[0] != 0x01 || val[30] != 0x55 || val[31] != 0xAA) return false;
@@ -2803,11 +2830,8 @@ static LRESULT CALLBACK RichEditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
 
     }
 
-    case WM_SIZE: {
-        HWND parent = GetParent(hwnd);
-        if (parent) FitWindowToParentClient(hwnd, parent);
-        break;
-    }
+    // WM_SIZE: do not MoveWindow(self) here — re-enters WM_SIZE and can loop.
+    // Size is set once in ListLoadW via FitWindowToParentClient; TC resizes the child itself.
 
     case WM_NCDESTROY: {
         WNDPROC saved = orig;
@@ -2927,8 +2951,6 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
 
     FileReader fr;
     IsoSummary sum;
-    std::vector<uint8_t> sec(g_sectorSize);
-    g_sectorSize = DEFAULT_SECTOR_SIZE;
 
     if (!FileToLoad || !fr.open(FileToLoad)) {
         txt << L"Ошибка\tНе удалось открыть файл ❌\r\n";
@@ -2946,11 +2968,11 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         txt << L"Ошибка\tНе обнаружена сигнатура ISO9660, UDIF (.dmg) и разметка диска (MBR/GPT) ❌\r\n";
         return txt.str();
     }
-    g_sectorSize = detectedSector;
-    sec.resize(g_sectorSize);
+    fr.sectorSize = detectedSector;
+    std::vector<uint8_t> sec(fr.sectorSize);
 
-    for (uint32_t s = VD_START_SECTOR; ; ++s) {
-        if (!fr.read_sector(s, sec.data(), g_sectorSize)) break;
+    for (uint32_t s = VD_START_SECTOR; s < VD_START_SECTOR + kMaxVolumeDescriptors; ++s) {
+        if (!fr.read_sector(s, sec.data(), fr.sectorSize)) break;
         uint8_t type = sec[0];
         if (!is_cd001(sec.data())) break;
 
@@ -3044,7 +3066,7 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
     }
 
     bool bootMarker = false;
-    if (fr.read_sector(17, sec.data(), g_sectorSize) && sec.size() >= 512)
+    if (fr.read_sector(17, sec.data(), fr.sectorSize) && sec.size() >= 512)
         bootMarker = (sec[510] == 0x55 && sec[511] == 0xAA);
 
     std::wstring fsType = L"💿 ISO 9660";
@@ -3378,12 +3400,12 @@ extern "C" HWND __stdcall ListLoad(HWND ParentWin, char* FileToLoad, int ShowFla
 }
 
 // Detect: ISO/DMG — обычные файлы; IMG — MULTIMEDIA в TC, без этого флага плагин игнорируется.
+// IMG: MULTIMEDIA required by TC; no bare EXT="IMG" (would steal GEM/picture .img).
 static const char kIsoListerDetectString[] =
     "EXT=\"ISO\" | EXT=\"DMG\" | "
     "(MULTIMEDIA & EXT=\"IMG\" & [510]=85 & [511]=170) | "
     "(MULTIMEDIA & EXT=\"IMG\" & [32769]=67 & [32770]=68 & [32771]=48 & [32772]=48 & [32773]=49) | "
-    "(MULTIMEDIA & EXT=\"IMG\" & SIZE>50000000) | "
-    "(MULTIMEDIA & EXT=\"IMG\")";
+    "(MULTIMEDIA & EXT=\"IMG\" & SIZE>50000000)";
 
 extern "C" void __stdcall ListGetDetectString(char* DetectString, int maxlen)
 {
