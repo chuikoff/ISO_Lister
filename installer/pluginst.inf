@@ -1,7 +1,7 @@
 [plugininstall]
 description=IsoLister — fast ISO/IMG/BIN/VHD/DMG analysis in Total Commander (F3/Ctrl+Q). WIM editions, Linux, UEFI/BIOS, MBR/GPT, auto RU/EN UI. No mount. 32+64-bit.
 descriptionrus=IsoLister — быстрый анализ ISO/IMG/BIN/VHD/DMG в Total Commander (F3/Ctrl+Q). Редакции WIM, Linux, UEFI/BIOS, MBR/GPT, язык UI по TC. Без монтирования. 32+64-bit.
-version=1.1.7
+version=1.1.8
 type=wlx
 file=IsoLister.wlx
 file64=IsoLister.wlx64

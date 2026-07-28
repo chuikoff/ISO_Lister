@@ -90,7 +90,10 @@ EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | 
 | `MaxNodes` | `40000` | Лимит узлов при полном скане |
 | `MaxFileList` | `1000` | Макс. файлов в списке |
 
-Язык UI: если в `wincmd.ini` `LanguageIni`/`LanguageDll` содержит **RUS** — русский отчёт; иначе **английский**. Цвета берутся из `[Lister] FgColor/BgColor`.
+Язык UI: если в `wincmd.ini` `LanguageIni`/`LanguageDll` содержит **RUS** — русский отчёт; иначе **английский**.
+
+Тёмная тема: по **`[Configuration] DarkMode`** (переключатель TC `cm_SwitchDarkMode`), **не** по теме Windows.  
+Опционально `[IsoLister] Dark=0|1|2` — light / dark / auto (по умолчанию `2` = как TC).
 
 Поиск в Lister: **Ctrl+F** / F7 (ListSearchText).
 
@@ -98,6 +101,7 @@ EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | 
 [IsoLister]
 FullScan=0
 Verbose=0
+Dark=2
 ShowFileList=0
 ShowBootEntries=0
 ```
@@ -205,7 +209,10 @@ Section `[IsoLister]` in `%APPDATA%\GHISLER\lsplugin.ini` (or `wincmd.ini`):
 | `MaxNodes` | `40000` | Node limit for full scan |
 | `MaxFileList` | `1000` | Max files in list |
 
-UI language: if `wincmd.ini` `LanguageIni`/`LanguageDll` contains **RUS** → Russian report; otherwise **English**. Colors from `[Lister] FgColor/BgColor`.
+UI language: if `wincmd.ini` `LanguageIni`/`LanguageDll` contains **RUS** → Russian report; otherwise **English**.
+
+Dark theme: follows **`[Configuration] DarkMode`** (TC `cm_SwitchDarkMode`), **not** Windows theme.  
+Optional `[IsoLister] Dark=0|1|2` — light / dark / auto (default `2` = TC).
 
 Search in Lister: **Ctrl+F** / F7 (`ListSearchText`).
 
@@ -213,6 +220,7 @@ Search in Lister: **Ctrl+F** / F7 (`ListSearchText`).
 [IsoLister]
 FullScan=0
 Verbose=0
+Dark=2
 ShowFileList=0
 ShowBootEntries=0
 ```

@@ -118,10 +118,13 @@ static int g_optShowFileList = 0;
 static int g_optMaxFileList = 1000;
 static int g_optFullScan = 0;
 static int g_optVerbose = 0; // 0 = краткий отчёт (без PVD/Path Table и т.п.)
+// Dark: 0=force light, 1=force dark, 2=auto → TC [Configuration] DarkMode (cm_SwitchDarkMode)
+static int g_optDark = 2;
 
 // UI: русский, если LanguageIni TC содержит RUS; иначе английский
 static bool g_uiRu = false;
-static COLORREF g_fgColor = RGB(0, 0, 0);
+static bool g_darkMode = false;
+static COLORREF g_fgColor = RGB(30, 30, 30);
 static COLORREF g_bgColor = RGB(255, 255, 255);
 
 static const wchar_t* tr(const wchar_t* ru, const wchar_t* en) {
@@ -154,15 +157,39 @@ static void detect_ui_language_from_ini(const wchar_t* iniPath) {
         g_uiRu = true;
 }
 
-static void load_lister_colors_from_ini(const wchar_t* iniPath) {
-    g_fgColor = GetSysColor(COLOR_WINDOWTEXT);
-    g_bgColor = GetSysColor(COLOR_WINDOW);
-    if (!iniPath || !iniPath[0]) return;
-    // TC stores COLORREF as decimal in [Lister]
-    int fg = GetPrivateProfileIntW(L"Lister", L"FgColor", -1, iniPath);
-    int bg = GetPrivateProfileIntW(L"Lister", L"BgColor", -1, iniPath);
-    if (fg >= 0) g_fgColor = (COLORREF)fg;
-    if (bg >= 0) g_bgColor = (COLORREF)bg;
+// TC cm_SwitchDarkMode state is persisted as DarkMode=0|1 in [Configuration] of wincmd.ini
+// (not Windows AppsUseLightTheme — TC has its own switch).
+static bool detect_tc_dark_mode(const wchar_t* wincmdPath) {
+    if (!wincmdPath || !wincmdPath[0]) return false;
+    return GetPrivateProfileIntW(L"Configuration", L"DarkMode", 0, wincmdPath) != 0;
+}
+
+static void recompute_theme(const wchar_t* wincmdPath) {
+    if (g_optDark == 0)
+        g_darkMode = false;
+    else if (g_optDark == 1)
+        g_darkMode = true;
+    else
+        g_darkMode = detect_tc_dark_mode(wincmdPath);
+
+    if (g_darkMode) {
+        // Match typical TC dark palette (not OS theme)
+        g_bgColor = RGB(32, 32, 32);
+        g_fgColor = RGB(220, 220, 220);
+    }
+    else {
+        g_bgColor = RGB(255, 255, 255);
+        g_fgColor = RGB(30, 30, 30);
+        // In light mode only: prefer Lister panel colors if set
+        if (wincmdPath && wincmdPath[0]) {
+            int fg = GetPrivateProfileIntW(L"Lister", L"FgColor", -1, wincmdPath);
+            int bg = GetPrivateProfileIntW(L"Lister", L"BgColor", -1, wincmdPath);
+            if (fg >= 0) g_fgColor = (COLORREF)fg;
+            if (bg >= 0) g_bgColor = (COLORREF)bg;
+        }
+    }
+    log_line(L"Theme: dark=%d DarkOpt=%d (TC DarkMode / cm_SwitchDarkMode)",
+        g_darkMode ? 1 : 0, g_optDark);
 }
 
 // Таб‑позиции (в "знаках", конвертируем в twips по шрифту)
@@ -2863,6 +2890,7 @@ static void load_options_from_ini_file(const wchar_t* iniPath) {
     int maxF = GetPrivateProfileIntW(L"IsoLister", L"MaxFileList", g_optMaxFileList, iniPath);
     int fullScan = GetPrivateProfileIntW(L"IsoLister", L"FullScan", g_optFullScan, iniPath);
     int verbose = GetPrivateProfileIntW(L"IsoLister", L"Verbose", g_optVerbose, iniPath);
+    int dark = GetPrivateProfileIntW(L"IsoLister", L"Dark", g_optDark, iniPath);
     g_optDepth = (depth > 0 && depth <= 32) ? depth : g_optDepth;
     g_optMaxNodes = (maxN >= 1000 && maxN <= 1000000) ? maxN : g_optMaxNodes;
     g_optShowBootEntries = (showB != 0) ? 1 : 0;
@@ -2870,6 +2898,7 @@ static void load_options_from_ini_file(const wchar_t* iniPath) {
     g_optMaxFileList = (maxF >= 50 && maxF <= 100000) ? maxF : g_optMaxFileList;
     g_optFullScan = (fullScan != 0) ? 1 : 0;
     g_optVerbose = (verbose != 0) ? 1 : 0;
+    if (dark >= 0 && dark <= 2) g_optDark = dark;
 }
 
 static void resolve_wincmd_ini(wchar_t* out, size_t cch) {
@@ -2900,18 +2929,17 @@ static void load_options_from_ini() {
     if (wincmd[0] && (g_iniPath.empty() || _wcsicmp(wincmd, g_iniPath.c_str()) != 0))
         load_options_from_ini_file(wincmd);
 
-    if (wincmd[0]) {
+    if (wincmd[0])
         detect_ui_language_from_ini(wincmd);
-        load_lister_colors_from_ini(wincmd);
-    }
-    if (!g_iniPath.empty()) {
+    if (!g_iniPath.empty())
         detect_ui_language_from_ini(g_iniPath.c_str());
-        load_lister_colors_from_ini(g_iniPath.c_str());
-    }
 
-    log_line(L"Options: ScanDepth=%d MaxNodes=%d ShowBootEntries=%d ShowFileList=%d MaxFileList=%d FullScan=%d Verbose=%d uiRu=%d",
+    // Theme follows TC DarkMode (cm_SwitchDarkMode), not OS AppsUseLightTheme
+    recompute_theme(wincmd[0] ? wincmd : (g_iniPath.empty() ? nullptr : g_iniPath.c_str()));
+
+    log_line(L"Options: ScanDepth=%d MaxNodes=%d ShowBootEntries=%d ShowFileList=%d MaxFileList=%d FullScan=%d Verbose=%d Dark=%d uiRu=%d darkMode=%d",
         g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList,
-        g_optFullScan, g_optVerbose, g_uiRu ? 1 : 0);
+        g_optFullScan, g_optVerbose, g_optDark, g_uiRu ? 1 : 0, g_darkMode ? 1 : 0);
 }
 
 // -----------------------------------------------------------------------------
@@ -3572,6 +3600,13 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
         return nullptr;
     }
 
+    // Re-read TC DarkMode each open (user may toggle cm_SwitchDarkMode without reload)
+    {
+        wchar_t wincmd[MAX_PATH]{};
+        resolve_wincmd_ini(wincmd, MAX_PATH);
+        recompute_theme(wincmd[0] ? wincmd : nullptr);
+    }
+
     bool quickView = (ShowFlags & lcp_fittowindow) != 0;
     std::wstring text;
     try {
@@ -3675,6 +3710,14 @@ extern "C" int __stdcall ListSendCommand(HWND ListWin, int Command, int Paramete
     case lc_selectall:
         SendMessageW(ListWin, EM_SETSEL, 0, -1);
         return LISTPLUGIN_OK;
+    case lc_newparams: {
+        wchar_t wincmd[MAX_PATH]{};
+        resolve_wincmd_ini(wincmd, MAX_PATH);
+        recompute_theme(wincmd[0] ? wincmd : nullptr);
+        RichSetDefaultCharFormat(ListWin);
+        InvalidateRect(ListWin, nullptr, TRUE);
+        return LISTPLUGIN_OK;
+    }
     default:
         break;
     }
