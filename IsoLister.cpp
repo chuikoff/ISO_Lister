@@ -3085,7 +3085,6 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
     txt << L"🗂 Тип ФС\t" << fsType << L"\r\n";
 
     txt << repeat(L'─', 90) << L"\r\n";
-    txt << L"⚡ Быстрый анализ (как Rufus)\t\r\n";
     if (sum.hasUDF) txt << L"ISO analysis\tОбраз UDF ✅\r\n";
     txt << L"Boot Marker\t" << (bootMarker ? L"да ✅" : L"нет ❌") << L"\r\n";
     if (!uefiBoots.empty()) {
