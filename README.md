@@ -16,6 +16,8 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 |------------|-----|------------------|
 | `.iso` | ISO 9660 / UDF | Метка тома, Joliet, Rock Ridge, El Torito, UEFI/BIOS, Windows/Linux |
 | `.img` | Raw-образ диска | MBR/GPT, разделы, FAT/NTFS, загрузочный код |
+| `.bin` | Raw dump | То же, что `.img` (MBR/GPT по сигнатурам / размеру) |
+| `.vhd` / `.vhdx` | Hyper-V | Метаданные VHD; fixed VHD — разбор MBR/GPT |
 | `.dmg` | Apple UDIF | koly/blkx, GPT, HFS+/APFS, EFI, версия установщика macOS |
 
 ### Что показывает отчёт
@@ -81,15 +83,21 @@ EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | 
 | Параметр | По умолчанию | Описание |
 |----------|--------------|----------|
 | `FullScan` | `0` | `1` — полный обход ISO9660 + UDF (медленно) |
+| `Verbose` | `0` | `1` — подробный PVD/Path Table/UDF NSR и т.п. |
 | `ShowFileList` | `0` | `1` — список файлов в отчёте |
 | `ShowBootEntries` | `0` | `1` — все записи El Torito Boot Catalog |
 | `ScanDepth` | `6` | Глубина каталогов при `FullScan=1` |
 | `MaxNodes` | `40000` | Лимит узлов при полном скане |
 | `MaxFileList` | `1000` | Макс. файлов в списке |
 
+Язык UI: если в `wincmd.ini` `LanguageIni`/`LanguageDll` содержит **RUS** — русский отчёт; иначе **английский**. Цвета берутся из `[Lister] FgColor/BgColor`.
+
+Поиск в Lister: **Ctrl+F** / F7 (ListSearchText).
+
 ```ini
 [IsoLister]
 FullScan=0
+Verbose=0
 ShowFileList=0
 ShowBootEntries=0
 ```
@@ -123,6 +131,8 @@ MIT — см. [LICENSE](LICENSE).
 |-----------|------|----------------------|
 | `.iso` | ISO 9660 / UDF | Volume label, Joliet, Rock Ridge, El Torito, UEFI/BIOS, Windows/Linux |
 | `.img` | Raw disk image | MBR/GPT, partitions, FAT/NTFS, boot code |
+| `.bin` | Raw dump | Same as `.img` (MBR/GPT by signature / size) |
+| `.vhd` / `.vhdx` | Hyper-V | VHD metadata; fixed VHD — MBR/GPT layout |
 | `.dmg` | Apple UDIF | koly/blkx, GPT, HFS+/APFS, EFI, macOS installer version |
 
 ### Report contents
@@ -188,15 +198,21 @@ Section `[IsoLister]` in `%APPDATA%\GHISLER\lsplugin.ini` (or `wincmd.ini`):
 | Option | Default | Description |
 |--------|---------|-------------|
 | `FullScan` | `0` | `1` — full ISO9660 + UDF tree walk (slow) |
+| `Verbose` | `0` | `1` — full PVD/Path Table/UDF NSR details |
 | `ShowFileList` | `0` | `1` — file list in report |
 | `ShowBootEntries` | `0` | `1` — full El Torito Boot Catalog table |
 | `ScanDepth` | `6` | Directory depth when `FullScan=1` |
 | `MaxNodes` | `40000` | Node limit for full scan |
 | `MaxFileList` | `1000` | Max files in list |
 
+UI language: if `wincmd.ini` `LanguageIni`/`LanguageDll` contains **RUS** → Russian report; otherwise **English**. Colors from `[Lister] FgColor/BgColor`.
+
+Search in Lister: **Ctrl+F** / F7 (`ListSearchText`).
+
 ```ini
 [IsoLister]
 FullScan=0
+Verbose=0
 ShowFileList=0
 ShowBootEntries=0
 ```

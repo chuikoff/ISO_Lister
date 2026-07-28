@@ -11,7 +11,20 @@
 #endif
 #include <windows.h>
 #include <windowsx.h>
+#include <commdlg.h>
 #include <strsafe.h>
+#ifndef FR_DOWN
+#define FR_DOWN 0x00000001
+#endif
+#ifndef FR_WHOLEWORD
+#define FR_WHOLEWORD 0x00000002
+#endif
+#ifndef FR_MATCHCASE
+#define FR_MATCHCASE 0x00000004
+#endif
+#ifndef EM_FINDTEXTEXW
+#define EM_FINDTEXTEXW (WM_USER + 124)
+#endif
 #include <string>
 #include <sstream>
 #include <vector>
@@ -41,6 +54,8 @@ extern "C" {
 #pragma comment(linker, "/EXPORT:ListCloseWindow")
 #pragma comment(linker, "/EXPORT:ListSetDefaultParams")
 #pragma comment(linker, "/EXPORT:ListSendCommand")
+#pragma comment(linker, "/EXPORT:ListSearchText")
+#pragma comment(linker, "/EXPORT:ListSearchTextW")
 
 // -----------------------------------------------------------------------------
 // Логирование (в %TEMP%\IsoLister.log)
@@ -95,13 +110,60 @@ static const uint32_t kMaxVolumeDescriptors = 64;
 static const size_t MAX_DIR_READ = 16 * 1024 * 1024;
 static const size_t kMaxSmallTextFile = 64 * 1024;
 
-// Опции (по умолчанию — быстрый режим как Rufus)
+// Опции (по умолчанию — быстрый режим)
 static int g_optDepth = 6;
 static int g_optMaxNodes = 40000;
 static int g_optShowBootEntries = 0;
 static int g_optShowFileList = 0;
 static int g_optMaxFileList = 1000;
 static int g_optFullScan = 0;
+static int g_optVerbose = 0; // 0 = краткий отчёт (без PVD/Path Table и т.п.)
+
+// UI: русский, если LanguageIni TC содержит RUS; иначе английский
+static bool g_uiRu = false;
+static COLORREF g_fgColor = RGB(0, 0, 0);
+static COLORREF g_bgColor = RGB(255, 255, 255);
+
+static const wchar_t* tr(const wchar_t* ru, const wchar_t* en) {
+    return g_uiRu ? ru : en;
+}
+static std::wstring yesno(bool v) {
+    return v ? tr(L"да ✅", L"yes ✅") : tr(L"нет ❌", L"no ❌");
+}
+
+static bool path_looks_russian_lang(const wchar_t* s) {
+    if (!s || !s[0]) return false;
+    std::wstring t(s);
+    for (auto& ch : t) ch = (wchar_t)towlower(ch);
+    return t.find(L"rus") != std::wstring::npos
+        || t.find(L"russian") != std::wstring::npos
+        || t.find(L"wcmd_ru") != std::wstring::npos
+        || t.find(L"\\ru\\") != std::wstring::npos
+        || t.find(L"_ru.") != std::wstring::npos;
+}
+
+static void detect_ui_language_from_ini(const wchar_t* iniPath) {
+    if (!iniPath || !iniPath[0]) return;
+    wchar_t buf[MAX_PATH]{};
+    GetPrivateProfileStringW(L"Configuration", L"LanguageIni", L"", buf, MAX_PATH, iniPath);
+    if (!buf[0])
+        GetPrivateProfileStringW(L"Configuration", L"LanguageDll", L"", buf, MAX_PATH, iniPath);
+    if (!buf[0])
+        GetPrivateProfileStringW(L"Configuration", L"Language", L"", buf, MAX_PATH, iniPath);
+    if (path_looks_russian_lang(buf))
+        g_uiRu = true;
+}
+
+static void load_lister_colors_from_ini(const wchar_t* iniPath) {
+    g_fgColor = GetSysColor(COLOR_WINDOWTEXT);
+    g_bgColor = GetSysColor(COLOR_WINDOW);
+    if (!iniPath || !iniPath[0]) return;
+    // TC stores COLORREF as decimal in [Lister]
+    int fg = GetPrivateProfileIntW(L"Lister", L"FgColor", -1, iniPath);
+    int bg = GetPrivateProfileIntW(L"Lister", L"BgColor", -1, iniPath);
+    if (fg >= 0) g_fgColor = (COLORREF)fg;
+    if (bg >= 0) g_bgColor = (COLORREF)bg;
+}
 
 // Таб‑позиции (в "знаках", конвертируем в twips по шрифту)
 static const int TAB_MAIN_1 = 26;   // поле → значение
@@ -567,33 +629,29 @@ static bool probe_disk_image(FileReader& fr, DiskImageInfo& out) {
     return !out.partitions.empty();
 }
 
-static std::wstring generate_disk_image_report(const wchar_t* FileToLoad, FileReader& fr, const DiskImageInfo& disk) {
-    std::wostringstream txt;
-    (void)FileToLoad;
-    txt << L"Тип образа\t💽 Образ диска (raw sector dump)\r\n";
-    txt << repeat(L'─', 90) << L"\r\n";
-    txt << L"🧱 Разметка диска\t" << (disk.gpt ? L"GPT ✅" : L"MBR ✅") << L"\r\n";
+static void append_disk_partitions(std::wostringstream& txt, FileReader& fr, const DiskImageInfo& disk) {
+    txt << L"🧱 " << tr(L"Разметка диска", L"Disk layout") << L"\t" << (disk.gpt ? L"GPT ✅" : L"MBR ✅") << L"\r\n";
     if (disk.diskSignature)
-        txt << L"Disk signature\t0x" << std::hex << std::uppercase << disk.diskSignature << std::dec << L"\r\n";
+        txt << tr(L"Сигнатура диска", L"Disk signature") << L"\t0x" << std::hex << std::uppercase << disk.diskSignature << std::dec << L"\r\n";
     if (!disk.bootCodeHint.empty())
-        txt << L"Загрузочный код\t" << disk.bootCodeHint << L"\r\n";
-    txt << L"Разделов\t" << disk.partitions.size() << L"\r\n";
+        txt << tr(L"Загрузочный код", L"Boot code") << L"\t" << disk.bootCodeHint << L"\r\n";
+    txt << tr(L"Разделов", L"Partitions") << L"\t" << disk.partitions.size() << L"\r\n";
     txt << repeat(L'─', 90) << L"\r\n";
 
     for (const auto& p : disk.partitions) {
-        txt << L"📦 Раздел #" << p.index << L"\t" << p.tableType;
+        txt << L"📦 " << tr(L"Раздел #", L"Partition #") << p.index << L"\t" << p.tableType;
         if (p.bootable) txt << L" (bootable)";
         txt << L"\r\n";
-        txt << L"  Тип\t" << p.typeName;
+        txt << L"  " << tr(L"Тип", L"Type") << L"\t" << p.typeName;
         if (p.mbrType) txt << L" (0x" << std::hex << std::uppercase << (int)p.mbrType << std::dec << L")";
         txt << L"\r\n";
-        if (!p.gptName.empty()) txt << L"  Имя GPT\t" << p.gptName << L"\r\n";
-        txt << L"  Начало\tLBA " << p.startLBA << L" (" << FormatFileSize(p.startLBA * DISK_SECTOR_SIZE) << L")\r\n";
-        txt << L"  Размер\t" << FormatFileSize(p.sectorCount * DISK_SECTOR_SIZE)
-            << L" (" << p.sectorCount << L" секторов)\r\n";
-        if (!p.fsName.empty()) txt << L"  ФС\t" << p.fsName << L" ✅\r\n";
-        if (!p.fsDetail.empty()) txt << L"  Детали ФС\t" << p.fsDetail << L"\r\n";
-        if (!p.volumeLabel.empty()) txt << L"  Метка тома\t'" << p.volumeLabel << L"'\r\n";
+        if (!p.gptName.empty()) txt << L"  " << tr(L"Имя GPT", L"GPT name") << L"\t" << p.gptName << L"\r\n";
+        txt << L"  " << tr(L"Начало", L"Start") << L"\tLBA " << p.startLBA << L" (" << FormatFileSize(p.startLBA * DISK_SECTOR_SIZE) << L")\r\n";
+        txt << L"  " << tr(L"Размер", L"Size") << L"\t" << FormatFileSize(p.sectorCount * DISK_SECTOR_SIZE)
+            << L" (" << p.sectorCount << L" " << tr(L"секторов", L"sectors") << L")\r\n";
+        if (!p.fsName.empty()) txt << L"  " << tr(L"ФС", L"FS") << L"\t" << p.fsName << L" ✅\r\n";
+        if (!p.fsDetail.empty()) txt << L"  " << tr(L"Детали ФС", L"FS details") << L"\t" << p.fsDetail << L"\r\n";
+        if (!p.volumeLabel.empty()) txt << L"  " << tr(L"Метка тома", L"Volume label") << L"\t'" << p.volumeLabel << L"'\r\n";
         if (!p.oemId.empty()) txt << L"  OEM ID\t" << p.oemId << L"\r\n";
         txt << L"\r\n";
     }
@@ -602,10 +660,111 @@ static std::wstring generate_disk_image_report(const wchar_t* FileToLoad, FileRe
     uint64_t used = 0;
     for (const auto& p : disk.partitions) used += p.sectorCount;
     if (imageSectors > used)
-        txt << L"Неразмечено\t" << FormatFileSize((imageSectors - used) * DISK_SECTOR_SIZE) << L"\r\n";
+        txt << tr(L"Неразмечено", L"Unallocated") << L"\t" << FormatFileSize((imageSectors - used) * DISK_SECTOR_SIZE) << L"\r\n";
+}
 
+static std::wstring generate_disk_image_report(const wchar_t* FileToLoad, FileReader& fr, const DiskImageInfo& disk) {
+    std::wostringstream txt;
+    (void)FileToLoad;
+    txt << tr(L"Тип образа", L"Image type") << L"\t💽 " << tr(L"Образ диска (raw sector dump)", L"Disk image (raw sector dump)") << L"\r\n";
     txt << repeat(L'─', 90) << L"\r\n";
-    txt << L"ℹ️ Примечание\tЭто образ диска, не ISO9660. Анализ ISO/UDF внутри разделов не выполняется.\r\n";
+    append_disk_partitions(txt, fr, disk);
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"ℹ️ " << tr(L"Примечание", L"Note") << L"\t"
+        << tr(L"Это образ диска, не ISO9660. Анализ ISO/UDF внутри разделов не выполняется.",
+              L"This is a disk image, not ISO9660. ISO/UDF inside partitions is not scanned.") << L"\r\n";
+    return txt.str();
+}
+
+// -----------------------------------------------------------------------------
+// VHD / VHDX
+// -----------------------------------------------------------------------------
+struct VhdInfo {
+    bool isVhd = false;
+    bool isVhdx = false;
+    bool isFixed = false;
+    bool isDynamic = false;
+    bool isDifferencing = false;
+    uint64_t virtualSize = 0;
+    uint64_t currentSize = 0;
+    uint32_t diskType = 0; // VHD: 2 fixed, 3 dynamic, 4 differencing
+    std::wstring typeLabel;
+};
+
+static bool probe_vhd(FileReader& fr, VhdInfo& out) {
+    uint64_t sz = fr.size_bytes();
+    if (sz < 512) return false;
+    uint8_t foot[512]{};
+    if (!fr.read_at(sz - 512, foot, 512)) return false;
+    if (memcmp(foot, "conectix", 8) != 0) return false;
+    auto be32 = [](const uint8_t* p) -> uint32_t {
+        return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+    };
+    auto be64 = [&](const uint8_t* p) -> uint64_t {
+        return ((uint64_t)be32(p) << 32) | be32(p + 4);
+    };
+    out.isVhd = true;
+    out.diskType = be32(foot + 0x3C);
+    out.currentSize = be64(foot + 0x28);
+    out.virtualSize = out.currentSize;
+    out.isFixed = (out.diskType == 2);
+    out.isDynamic = (out.diskType == 3);
+    out.isDifferencing = (out.diskType == 4);
+    if (out.isFixed) out.typeLabel = L"Fixed VHD";
+    else if (out.isDynamic) out.typeLabel = L"Dynamic VHD";
+    else if (out.isDifferencing) out.typeLabel = L"Differencing VHD";
+    else out.typeLabel = L"VHD";
+    return true;
+}
+
+static bool probe_vhdx(FileReader& fr, VhdInfo& out) {
+    uint8_t hdr[16]{};
+    if (!fr.read_at(0, hdr, 8)) return false;
+    if (memcmp(hdr, "vhdxfile", 8) != 0) return false;
+    out.isVhdx = true;
+    out.typeLabel = L"VHDX";
+    // Virtual size is in metadata region — best-effort: report file size
+    out.currentSize = fr.size_bytes();
+    out.virtualSize = out.currentSize;
+    // Try to find dynamic header signature "head" at 64KB / 128KB (common)
+    uint8_t dh[512]{};
+    for (uint64_t off : { 64ull * 1024, 128ull * 1024 }) {
+        if (off + 512 > fr.size_bytes()) continue;
+        if (!fr.read_at(off, dh, 512)) continue;
+        if (memcmp(dh, "head", 4) != 0) continue;
+        // SequenceNumber at +8 (LE), FileWriteGuid etc. — VirtualDiskSize in metadata
+        break;
+    }
+    return true;
+}
+
+static std::wstring generate_vhd_report(const wchar_t* FileToLoad, FileReader& fr, const VhdInfo& vhd) {
+    std::wostringstream txt;
+    (void)FileToLoad;
+    txt << tr(L"Тип образа", L"Image type") << L"\t💾 " << vhd.typeLabel << L"\r\n";
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << tr(L"Формат", L"Format") << L"\t" << (vhd.isVhdx ? L"VHDX" : L"VHD") << L" ✅\r\n";
+    if (vhd.diskType)
+        txt << tr(L"Тип диска", L"Disk type") << L"\t" << vhd.diskType
+            << (vhd.isFixed ? L" (fixed)" : vhd.isDynamic ? L" (dynamic)" : vhd.isDifferencing ? L" (differencing)" : L"") << L"\r\n";
+    if (vhd.currentSize)
+        txt << tr(L"Размер файла / current", L"File / current size") << L"\t" << FormatFileSize(vhd.currentSize) << L"\r\n";
+    if (vhd.virtualSize && vhd.virtualSize != vhd.currentSize)
+        txt << tr(L"Виртуальный размер", L"Virtual size") << L"\t" << FormatFileSize(vhd.virtualSize) << L"\r\n";
+
+    if (vhd.isVhd && vhd.isFixed) {
+        DiskImageInfo disk;
+        if (probe_disk_image(fr, disk)) {
+            txt << repeat(L'─', 90) << L"\r\n";
+            append_disk_partitions(txt, fr, disk);
+        }
+    }
+    else {
+        txt << repeat(L'─', 90) << L"\r\n";
+        txt << L"ℹ️ " << tr(L"Примечание", L"Note") << L"\t"
+            << tr(L"Динамические/разностные VHD и полный разбор VHDX: показаны метаданные; fixed VHD разбирается как raw.",
+                  L"Dynamic/differencing VHD and full VHDX parse: metadata only; fixed VHD is scanned as raw.") << L"\r\n";
+    }
     return txt.str();
 }
 
@@ -890,15 +1049,16 @@ static std::wstring generate_udif_dmg_report(const wchar_t* FileToLoad, FileRead
     std::wostringstream txt;
     (void)FileToLoad;
     (void)fr;
-    txt << L"Тип образа\t🍎 Apple Disk Image (UDIF .dmg)\r\n";
+    txt << tr(L"Тип образа", L"Image type") << L"\t🍎 Apple Disk Image (UDIF .dmg)\r\n";
     txt << repeat(L'─', 90) << L"\r\n";
     txt << L"📀 UDIF\t\r\n";
-    txt << L"Формат\t" << udif_format_label(dmg.chunkTypes) << L" ✅\r\n";
-    txt << L"UDIF версия\t" << dmg.version << L"\r\n";
+    txt << tr(L"Формат", L"Format") << L"\t" << udif_format_label(dmg.chunkTypes) << L" ✅\r\n";
+    txt << tr(L"UDIF версия", L"UDIF version") << L"\t" << dmg.version << L"\r\n";
     txt << L"Data fork\t" << FormatFileSize(dmg.dataForkLength) << L"\r\n";
-    txt << L"Развёрнутый размер\t" << FormatFileSize(dmg.sectorCount * 512) << L" (" << dmg.sectorCount << L" секторов)\r\n";
+    txt << tr(L"Развёрнутый размер", L"Expanded size") << L"\t" << FormatFileSize(dmg.sectorCount * 512)
+        << L" (" << dmg.sectorCount << L" " << tr(L"секторов", L"sectors") << L")\r\n";
     if (!dmg.chunkTypes.empty()) {
-        txt << L"Сжатие (типы блоков)\t";
+        txt << tr(L"Сжатие (типы блоков)", L"Compression (block types)") << L"\t";
         bool first = true;
         for (uint32_t t : dmg.chunkTypes) {
             if (t == 0x7ffffffe || t == 0xffffffff) continue;
@@ -916,20 +1076,22 @@ static std::wstring generate_udif_dmg_report(const wchar_t* FileToLoad, FileRead
     if (hasMac || !dmg.macOsHint.empty()) {
         txt << repeat(L'─', 90) << L"\r\n";
         txt << L"🍎 macOS\t\r\n";
-        txt << L"Тип образа\tУстановочный / recovery DMG\r\n";
-        if (!dmg.macOsHint.empty()) txt << L"Detected\t" << dmg.macOsHint << L"\r\n";
+        txt << tr(L"Тип образа", L"Image type") << L"\t"
+            << tr(L"Установочный / recovery DMG", L"Installer / recovery DMG") << L"\r\n";
+        if (!dmg.macOsHint.empty())
+            txt << tr(L"Обнаружено", L"Detected") << L"\t" << dmg.macOsHint << L"\r\n";
         if (!dmg.hfsMountedVersion.empty())
             txt << L"HFS+ lastMountedVersion\t" << dmg.hfsMountedVersion << L"\r\n";
     }
 
     txt << repeat(L'─', 90) << L"\r\n";
-    txt << L"🧱 Разделы (blkx)\t" << dmg.partitions.size() << L"\r\n";
+    txt << L"🧱 " << tr(L"Разделы (blkx)", L"Partitions (blkx)") << L"\t" << dmg.partitions.size() << L"\r\n";
     int shown = 0;
     for (const auto& p : dmg.partitions) {
         if (p.structural) continue;
         if (p.name.empty() && p.sectorCount <= 64) continue;
         ++shown;
-        txt << L"📦\t" << (p.name.empty() ? L"(без имени)" : p.name);
+        txt << L"📦\t" << (p.name.empty() ? tr(L"(без имени)", L"(unnamed)") : p.name.c_str());
         if (p.sectorCount) txt << L" — " << FormatFileSize(p.sectorCount * 512);
         if (p.appleHfs) txt << L" [HFS+]";
         if (p.appleApfs) txt << L" [APFS]";
@@ -938,14 +1100,16 @@ static std::wstring generate_udif_dmg_report(const wchar_t* FileToLoad, FileRead
     }
     if (!shown) {
         for (const auto& p : dmg.partitions) {
-            txt << L"📦\t" << (p.name.empty() ? L"(без имени)" : p.name);
+            txt << L"📦\t" << (p.name.empty() ? tr(L"(без имени)", L"(unnamed)") : p.name.c_str());
             if (p.sectorCount) txt << L" — " << FormatFileSize(p.sectorCount * 512);
             txt << L"\r\n";
         }
     }
 
     txt << repeat(L'─', 90) << L"\r\n";
-    txt << L"ℹ️ Примечание\tСодержимое сжатых блоков не распаковывается — показаны метаданные UDIF и разметка.\r\n";
+    txt << L"ℹ️ " << tr(L"Примечание", L"Note") << L"\t"
+        << tr(L"Содержимое сжатых блоков не распаковывается — показаны метаданные UDIF и разметка.",
+              L"Compressed blocks are not expanded — UDIF metadata and layout only.") << L"\r\n";
     return txt.str();
 }
 
@@ -2580,11 +2744,11 @@ static void RichSetDefaultCharFormat(HWND hRE) {
     CHARFORMAT2W cf{};
     cf.cbSize = sizeof(cf);
     cf.dwMask = CFM_FACE | CFM_COLOR | CFM_SIZE;
-    cf.crTextColor = RGB(0, 0, 0);
+    cf.crTextColor = g_fgColor;
     cf.yHeight = 240;
     StringCchCopyW(cf.szFaceName, LF_FACESIZE, L"Consolas");
     SendMessageW(hRE, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
-    SendMessageW(hRE, EM_SETBKGNDCOLOR, 0, RGB(255, 255, 255));
+    SendMessageW(hRE, EM_SETBKGNDCOLOR, 0, (LPARAM)g_bgColor);
 }
 
 static bool RichSetTextUnicode(HWND hRE, const std::wstring& text) {
@@ -2698,27 +2862,56 @@ static void load_options_from_ini_file(const wchar_t* iniPath) {
     int showF = GetPrivateProfileIntW(L"IsoLister", L"ShowFileList", g_optShowFileList, iniPath);
     int maxF = GetPrivateProfileIntW(L"IsoLister", L"MaxFileList", g_optMaxFileList, iniPath);
     int fullScan = GetPrivateProfileIntW(L"IsoLister", L"FullScan", g_optFullScan, iniPath);
+    int verbose = GetPrivateProfileIntW(L"IsoLister", L"Verbose", g_optVerbose, iniPath);
     g_optDepth = (depth > 0 && depth <= 32) ? depth : g_optDepth;
     g_optMaxNodes = (maxN >= 1000 && maxN <= 1000000) ? maxN : g_optMaxNodes;
     g_optShowBootEntries = (showB != 0) ? 1 : 0;
     g_optShowFileList = (showF != 0) ? 1 : 0;
     g_optMaxFileList = (maxF >= 50 && maxF <= 100000) ? maxF : g_optMaxFileList;
     g_optFullScan = (fullScan != 0) ? 1 : 0;
+    g_optVerbose = (verbose != 0) ? 1 : 0;
+}
+
+static void resolve_wincmd_ini(wchar_t* out, size_t cch) {
+    out[0] = 0;
+    if (!g_iniPath.empty()) {
+        StringCchCopyW(out, cch, g_iniPath.c_str());
+        wchar_t* slash = wcsrchr(out, L'\\');
+        if (slash) {
+            StringCchCopyW(slash + 1, cch - (size_t)(slash + 1 - out), L"wincmd.ini");
+            if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return;
+        }
+    }
+    wchar_t appdata[MAX_PATH]{};
+    if (GetEnvironmentVariableW(L"APPDATA", appdata, MAX_PATH) > 0) {
+        StringCchPrintfW(out, cch, L"%s\\GHISLER\\wincmd.ini", appdata);
+        if (GetFileAttributesW(out) != INVALID_FILE_ATTRIBUTES) return;
+        StringCchPrintfW(out, cch, L"%s\\GHISLER\\WINCMD.INI", appdata);
+    }
 }
 
 static void load_options_from_ini() {
-    if (g_iniPath.empty()) return;
-    load_options_from_ini_file(g_iniPath.c_str());
+    g_uiRu = false;
+    if (!g_iniPath.empty())
+        load_options_from_ini_file(g_iniPath.c_str());
+
     wchar_t wincmd[MAX_PATH]{};
-    StringCchCopyW(wincmd, MAX_PATH, g_iniPath.c_str());
-    wchar_t* slash = wcsrchr(wincmd, L'\\');
-    if (slash) {
-        StringCchCopyW(slash + 1, MAX_PATH - (size_t)(slash + 1 - wincmd), L"wincmd.ini");
-        if (_wcsicmp(wincmd, g_iniPath.c_str()) != 0)
-            load_options_from_ini_file(wincmd);
+    resolve_wincmd_ini(wincmd, MAX_PATH);
+    if (wincmd[0] && (g_iniPath.empty() || _wcsicmp(wincmd, g_iniPath.c_str()) != 0))
+        load_options_from_ini_file(wincmd);
+
+    if (wincmd[0]) {
+        detect_ui_language_from_ini(wincmd);
+        load_lister_colors_from_ini(wincmd);
     }
-    log_line(L"Options: ScanDepth=%d, MaxNodes=%d, ShowBootEntries=%d, ShowFileList=%d, MaxFileList=%d, FullScan=%d",
-        g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList, g_optFullScan);
+    if (!g_iniPath.empty()) {
+        detect_ui_language_from_ini(g_iniPath.c_str());
+        load_lister_colors_from_ini(g_iniPath.c_str());
+    }
+
+    log_line(L"Options: ScanDepth=%d MaxNodes=%d ShowBootEntries=%d ShowFileList=%d MaxFileList=%d FullScan=%d Verbose=%d uiRu=%d",
+        g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList,
+        g_optFullScan, g_optVerbose, g_uiRu ? 1 : 0);
 }
 
 // -----------------------------------------------------------------------------
@@ -2780,11 +2973,13 @@ static LRESULT CALLBACK RichEditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam,
 
 
 
-        AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), IDM_CTX_COPY, L"Копировать	Ctrl+C");
+        AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), IDM_CTX_COPY,
+            tr(L"Копировать	Ctrl+C", L"Copy	Ctrl+C"));
 
         AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
 
-        AppendMenuW(menu, MF_STRING, IDM_CTX_SELECTALL, L"Выделить всё	Ctrl+A");
+        AppendMenuW(menu, MF_STRING, IDM_CTX_SELECTALL,
+            tr(L"Выделить всё	Ctrl+A", L"Select all	Ctrl+A"));
 
 
 
@@ -2953,7 +3148,8 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
     IsoSummary sum;
 
     if (!FileToLoad || !fr.open(FileToLoad)) {
-        txt << L"Ошибка\tНе удалось открыть файл ❌\r\n";
+        txt << tr(L"Ошибка", L"Error") << L"\t"
+            << tr(L"Не удалось открыть файл ❌", L"Failed to open file ❌") << L"\r\n";
         return txt.str();
     }
 
@@ -2962,10 +3158,15 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         UdIfInfo dmg;
         if (probe_udif_dmg(fr, dmg, FileToLoad))
             return generate_udif_dmg_report(FileToLoad, fr, dmg);
+        VhdInfo vhd;
+        if (probe_vhdx(fr, vhd) || probe_vhd(fr, vhd))
+            return generate_vhd_report(FileToLoad, fr, vhd);
         DiskImageInfo disk;
         if (probe_disk_image(fr, disk))
             return generate_disk_image_report(FileToLoad, fr, disk);
-        txt << L"Ошибка\tНе обнаружена сигнатура ISO9660, UDIF (.dmg) и разметка диска (MBR/GPT) ❌\r\n";
+        txt << tr(L"Ошибка", L"Error") << L"\t"
+            << tr(L"Не обнаружена сигнатура ISO9660, UDIF (.dmg), VHD/VHDX и разметка диска (MBR/GPT) ❌",
+                  L"No ISO9660, UDIF (.dmg), VHD/VHDX or disk layout (MBR/GPT) signature found ❌") << L"\r\n";
         return txt.str();
     }
     fr.sectorSize = detectedSector;
@@ -3061,7 +3262,8 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         else if (scan_pe_cert_string(fr, efiRef.lba, (uint32_t)std::min<uint64_t>(efiRef.size, UINT32_MAX), "Microsoft Corporation", bi.signer))
             bi.signer = L"Microsoft Corporation";
         if (bi.signer.find(L"2011") != std::wstring::npos)
-            bi.note = L"Может не пройти Secure Boot на системах с сертификатом Windows UEFI CA 2023";
+            bi.note = tr(L"Может не пройти Secure Boot на системах с сертификатом Windows UEFI CA 2023",
+                         L"May fail Secure Boot on systems with Windows UEFI CA 2023 certificate");
         uefiBoots.push_back(std::move(bi));
     }
 
@@ -3082,13 +3284,31 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         }
     }
 
-    txt << L"🗂 Тип ФС\t" << fsType << L"\r\n";
+    auto append_wim_editions = [&](bool withHeader) {
+        if (!winInfo.detected || winInfo.editions.empty()) return;
+        if (withHeader) txt << repeat(L'─', 90) << L"\r\n";
+        txt << tr(L"Редакции (WIM)", L"WIM editions") << L"\t"
+            << (int)winInfo.editions.size() << L" "
+            << tr(L"образ(ов)", L"image(s)") << L"\r\n";
+        txt << L"#\t" << tr(L"Название", L"Name") << L"\tEditionID\t" << tr(L"Версия", L"Version") << L"\r\n";
+        for (const auto& ed : winInfo.editions) {
+            txt << ed.index << L"\t"
+                << (ed.displayName.empty() ? ed.name : ed.displayName) << L"\t"
+                << (ed.editionId.empty() ? L"—" : ed.editionId) << L"\t"
+                << (ed.version.empty() ? L"—" : ed.version);
+            if (!ed.arch.empty()) txt << L" (" << ed.arch << L")";
+            if (!ed.language.empty()) txt << L" [" << ed.language << L"]";
+            txt << L"\r\n";
+        }
+    };
 
+    txt << L"🗂 " << tr(L"Тип ФС", L"FS type") << L"\t" << fsType << L"\r\n";
     txt << repeat(L'─', 90) << L"\r\n";
-    if (sum.hasUDF) txt << L"ISO analysis\tОбраз UDF ✅\r\n";
-    txt << L"Boot Marker\t" << (bootMarker ? L"да ✅" : L"нет ❌") << L"\r\n";
+    if (sum.hasUDF)
+        txt << tr(L"Анализ ISO", L"ISO analysis") << L"\t" << tr(L"Образ UDF ✅", L"UDF image ✅") << L"\r\n";
+    txt << L"Boot Marker\t" << yesno(bootMarker) << L"\r\n";
     if (!uefiBoots.empty()) {
-        txt << L"UEFI bootloaders\t\r\n";
+        txt << tr(L"UEFI-загрузчики", L"UEFI bootloaders") << L"\t\r\n";
         for (const auto& bi : uefiBoots) {
             txt << L"  •\t" << bi.path;
             if (!bi.signer.empty()) txt << L" — " << bi.signer;
@@ -3097,144 +3317,161 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         }
     }
     if (!sum.volId.empty())
-        txt << L"ISO label\t'" << sum.volId << L"'\r\n";
+        txt << tr(L"Метка ISO", L"ISO label") << L"\t'" << sum.volId << L"'\r\n";
     if (linuxInfo.detected) {
         std::wstring detected = linuxInfo.distro;
         if (!linuxInfo.version.empty()) detected += L" " + linuxInfo.version;
-        txt << L"Detected\t" << detected << L"\r\n";
+        txt << tr(L"Обнаружено", L"Detected") << L"\t" << detected << L"\r\n";
         if (!linuxInfo.arch.empty())
-            txt << L"Architecture\t" << linuxInfo.arch << L"\r\n";
-        if (sum.uefiBoot || !uefiBoots.empty()) txt << L"Uses\tEFI ✅\r\n";
-        if (sum.biosBoot || scan.foundISOLINUX) txt << L"Uses\tBIOS (isolinux/grub) ✅\r\n";
-        if (!linuxInfo.squashfsPath.empty()) txt << L"Uses\tLive-система (squashfs) ✅\r\n";
+            txt << tr(L"Архитектура", L"Architecture") << L"\t" << linuxInfo.arch << L"\r\n";
+        if (sum.uefiBoot || !uefiBoots.empty()) txt << tr(L"Использует", L"Uses") << L"\tEFI ✅\r\n";
+        if (sum.biosBoot || scan.foundISOLINUX) txt << tr(L"Использует", L"Uses") << L"\tBIOS (isolinux/grub) ✅\r\n";
+        if (!linuxInfo.squashfsPath.empty())
+            txt << tr(L"Использует", L"Uses") << L"\t" << tr(L"Live-система (squashfs)", L"Live system (squashfs)") << L" ✅\r\n";
     }
     else if (winInfo.detected) {
         std::wstring detected = winInfo.productVersion;
         if (detected.empty()) detected = L"Windows";
-        txt << L"Detected\t" << detected << L"\r\n";
+        txt << tr(L"Обнаружено", L"Detected") << L"\t" << detected << L"\r\n";
         if (!winInfo.buildNumber.empty())
             txt << L"Build\t" << winInfo.buildNumber << L"\r\n";
-        if (sum.uefiBoot || !uefiBoots.empty()) txt << L"Uses\tEFI ✅\r\n";
-        if (sum.biosBoot || sum.foundWinBootMgr) txt << L"Uses\tBootmgr (BIOS/UEFI) ✅\r\n";
+        if (sum.uefiBoot || !uefiBoots.empty()) txt << tr(L"Использует", L"Uses") << L"\tEFI ✅\r\n";
+        if (sum.biosBoot || sum.foundWinBootMgr) txt << tr(L"Использует", L"Uses") << L"\tBootmgr (BIOS/UEFI) ✅\r\n";
         if (!wimVersion.empty()) {
             std::wstring installName = installRef && installRef->path.find(L".esd") != std::wstring::npos
                 ? L"Install.esd" : L"Install.wim";
-            txt << L"Uses\t" << installName << L" (version " << wimVersion << L") ✅\r\n";
+            txt << tr(L"Использует", L"Uses") << L"\t" << installName
+                << L" (" << tr(L"версия", L"version") << L" " << wimVersion << L") ✅\r\n";
         }
     }
 
+    // Редакции WIM — всегда вверху (и F3, и Ctrl+Q)
+    append_wim_editions(true);
+
     if (compact) {
-        if (sum.biosBoot && sum.uefiBoot) txt << L"Тип загрузки\tBIOS и UEFI\r\n";
-        else if (sum.biosBoot)            txt << L"Тип загрузки\tBIOS\r\n";
-        else if (sum.uefiBoot)            txt << L"Тип загрузки\tUEFI\r\n";
+        if (sum.biosBoot && sum.uefiBoot) txt << tr(L"Тип загрузки", L"Boot type") << L"\tBIOS + UEFI\r\n";
+        else if (sum.biosBoot)            txt << tr(L"Тип загрузки", L"Boot type") << L"\tBIOS\r\n";
+        else if (sum.uefiBoot)            txt << tr(L"Тип загрузки", L"Boot type") << L"\tUEFI\r\n";
         if (!sum.bootLoader.empty())
-            txt << L"Загрузчик\t" << sum.bootLoader << L"\r\n";
-        if (winInfo.detected && !winInfo.editions.empty()) {
-            txt << repeat(L'─', 90) << L"\r\n";
-            txt << L"Редакции (WIM)\t" << (int)winInfo.editions.size() << L" образ(ов)\r\n";
-            for (const auto& ed : winInfo.editions) {
-                txt << ed.index << L"\t"
-                    << (ed.displayName.empty() ? ed.name : ed.displayName) << L"\t"
-                    << (ed.editionId.empty() ? L"—" : ed.editionId) << L"\t"
-                    << (ed.version.empty() ? L"—" : ed.version) << L"\r\n";
-            }
-        }
+            txt << tr(L"Загрузчик", L"Bootloader") << L"\t" << sum.bootLoader << L"\r\n";
         return txt.str();
     }
 
-    if (sum.hasPVD) {
-        double MB = (double)sum.volBlocks * sum.logicalBlockSize / (1024.0 * 1024.0);
-        txt << L"System ID\t" << sum.sysId << L"\r\n";
-        txt << L"Volume ID\t" << sum.volId << L"\r\n";
-        txt << L"Application ID\t" << sum.appId << L"\r\n";
-        if (!sum.publisherId.empty()) txt << L"Publisher\t" << sum.publisherId << L"\r\n";
-        if (!sum.dataPreparerId.empty()) txt << L"Data Preparer\t" << sum.dataPreparerId << L"\r\n";
-        if (!sum.volumeSetId.empty()) txt << L"Volume Set ID\t" << sum.volumeSetId << L"\r\n";
-        if (sum.volumeSetSize) txt << L"Volume Set Size\t" << sum.volumeSetSize << L"\r\n";
-        if (sum.volumeSequenceNumber) txt << L"Volume Sequence\t" << sum.volumeSequenceNumber << L"\r\n";
-        txt << L"Logical Block Size\t" << sum.logicalBlockSize << L"\r\n";
-        txt << L"Volume Space\t" << sum.volBlocks << L" блоков (≈ " << (int)(MB + 0.5) << L" MB)\r\n";
-        txt << L"Path Table\tL " << sum.pathTableL << L", M " << sum.pathTableM
-            << L", size " << sum.pathTableSize << L" байт\r\n";
-        txt << L"Root Dir\tLBA " << (sum.joliet ? sum.jolietRootLBA : sum.rootDirLBA)
-            << L", size " << (sum.joliet ? sum.jolietRootSize : sum.rootDirSize) << L" байт\r\n";
-        txt << L"🗓 Создан\t" << sum.created << L"\r\n";
-        txt << L"🗓 Изменён\t" << sum.modified << L"\r\n";
-        txt << L"Joliet\t" << (sum.joliet ? (L"да ✅ (esc=" + ATrimRight(sum.jolietEsc) + L")") : L"нет ❌") << L"\r\n";
-        txt << L"Rock Ridge\t" << (sum.rockRidge ? L"да ✅" : L"нет ❌") << L"\r\n";
-    }
-    else {
-        txt << L"⚠️ Предупреждение\tPVD не найден — возможно, это не ISO9660\r\n";
-    }
+    if (g_optVerbose) {
+        if (sum.hasPVD) {
+            double MB = (double)sum.volBlocks * sum.logicalBlockSize / (1024.0 * 1024.0);
+            txt << repeat(L'─', 90) << L"\r\n";
+            txt << L"System ID\t" << sum.sysId << L"\r\n";
+            txt << L"Volume ID\t" << sum.volId << L"\r\n";
+            txt << L"Application ID\t" << sum.appId << L"\r\n";
+            if (!sum.publisherId.empty()) txt << L"Publisher\t" << sum.publisherId << L"\r\n";
+            if (!sum.dataPreparerId.empty()) txt << L"Data Preparer\t" << sum.dataPreparerId << L"\r\n";
+            if (!sum.volumeSetId.empty()) txt << L"Volume Set ID\t" << sum.volumeSetId << L"\r\n";
+            if (sum.volumeSetSize) txt << L"Volume Set Size\t" << sum.volumeSetSize << L"\r\n";
+            if (sum.volumeSequenceNumber) txt << L"Volume Sequence\t" << sum.volumeSequenceNumber << L"\r\n";
+            txt << L"Logical Block Size\t" << sum.logicalBlockSize << L"\r\n";
+            txt << L"Volume Space\t" << sum.volBlocks << L" "
+                << tr(L"блоков", L"blocks") << L" (≈ " << (int)(MB + 0.5) << L" MB)\r\n";
+            txt << L"Path Table\tL " << sum.pathTableL << L", M " << sum.pathTableM
+                << L", size " << sum.pathTableSize << L" " << tr(L"байт", L"bytes") << L"\r\n";
+            txt << L"Root Dir\tLBA " << (sum.joliet ? sum.jolietRootLBA : sum.rootDirLBA)
+                << L", size " << (sum.joliet ? sum.jolietRootSize : sum.rootDirSize)
+                << L" " << tr(L"байт", L"bytes") << L"\r\n";
+            txt << L"🗓 " << tr(L"Создан", L"Created") << L"\t" << sum.created << L"\r\n";
+            txt << L"🗓 " << tr(L"Изменён", L"Modified") << L"\t" << sum.modified << L"\r\n";
+            txt << L"Joliet\t" << (sum.joliet ? (yesno(true) + L" (esc=" + ATrimRight(sum.jolietEsc) + L")") : yesno(false)) << L"\r\n";
+            txt << L"Rock Ridge\t" << yesno(sum.rockRidge) << L"\r\n";
+        }
+        else {
+            txt << L"⚠️ " << tr(L"Предупреждение", L"Warning") << L"\t"
+                << tr(L"PVD не найден — возможно, это не ISO9660", L"PVD not found — may not be ISO9660") << L"\r\n";
+        }
 
-    if (sum.hasUDF) {
-        txt << repeat(L'─', 90) << L"\r\n";
-        txt << L"📀 UDF (ECMA-167)\t\r\n";
-        txt << L"NSR версия\tNSR0" << sum.udfNsrVersion << L"\r\n";
-        if (!sum.udfPrimaryVolumeId.empty())
-            txt << L"Primary Volume ID\t" << sum.udfPrimaryVolumeId << L"\r\n";
-        if (!sum.udfLogicalVolumeId.empty())
-            txt << L"Logical Volume ID\t" << sum.udfLogicalVolumeId << L"\r\n";
-        if (!sum.udfVolumeSetId.empty())
-            txt << L"Volume Set ID\t" << sum.udfVolumeSetId << L"\r\n";
-        if (sum.udfPartitionLength)
-            txt << L"Раздел\tLBA " << sum.udfPartitionStart << L", " << sum.udfPartitionLength << L" секторов\r\n";
+        if (sum.hasUDF) {
+            txt << repeat(L'─', 90) << L"\r\n";
+            txt << L"📀 UDF (ECMA-167)\t\r\n";
+            txt << tr(L"NSR версия", L"NSR version") << L"\tNSR0" << sum.udfNsrVersion << L"\r\n";
+            if (!sum.udfPrimaryVolumeId.empty())
+                txt << L"Primary Volume ID\t" << sum.udfPrimaryVolumeId << L"\r\n";
+            if (!sum.udfLogicalVolumeId.empty())
+                txt << L"Logical Volume ID\t" << sum.udfLogicalVolumeId << L"\r\n";
+            if (!sum.udfVolumeSetId.empty())
+                txt << L"Volume Set ID\t" << sum.udfVolumeSetId << L"\r\n";
+            if (sum.udfPartitionLength)
+                txt << tr(L"Раздел", L"Partition") << L"\tLBA " << sum.udfPartitionStart << L", "
+                    << sum.udfPartitionLength << L" " << tr(L"секторов", L"sectors") << L"\r\n";
+        }
     }
-    else {
-        txt << L"UDF\tнет ❌\r\n";
+    else if (sum.hasPVD) {
+        // краткий режим: только даты, без Path Table / Root Dir
+        if (!sum.created.empty() || !sum.modified.empty()) {
+            if (!sum.created.empty())
+                txt << L"🗓 " << tr(L"Создан", L"Created") << L"\t" << sum.created << L"\r\n";
+            if (!sum.modified.empty())
+                txt << L"🗓 " << tr(L"Изменён", L"Modified") << L"\t" << sum.modified << L"\r\n";
+        }
+        if (sum.joliet || sum.rockRidge) {
+            txt << L"Joliet\t" << yesno(sum.joliet) << L"\r\n";
+            txt << L"Rock Ridge\t" << yesno(sum.rockRidge) << L"\r\n";
+        }
     }
 
     txt << repeat(L'─', 90) << L"\r\n";
-    txt << L"🚀 Загрузка (El Torito)\t\r\n";
-    txt << L"Загрузочный ISO\t" << (sum.bootable ? L"да ✅" : L"нет ❌") << L"\r\n";
+    txt << L"🚀 " << tr(L"Загрузка (El Torito)", L"Boot (El Torito)") << L"\t\r\n";
+    txt << tr(L"Загрузочный ISO", L"Bootable ISO") << L"\t" << yesno(sum.bootable) << L"\r\n";
     if (sum.hasBootRecord) {
-        txt << L"Boot Record\tда ✅\r\n";
-        txt << L"Boot System ID\t" << (sum.bootSystemId.empty() ? L"—" : sum.bootSystemId.c_str()) << L"\r\n";
-        txt << L"Boot Catalog LBA\t" << sum.bootCatalogLBA << L"\r\n";
+        txt << L"Boot Record\t" << yesno(true) << L"\r\n";
+        if (g_optVerbose) {
+            txt << L"Boot System ID\t" << (sum.bootSystemId.empty() ? L"—" : sum.bootSystemId.c_str()) << L"\r\n";
+            txt << L"Boot Catalog LBA\t" << sum.bootCatalogLBA << L"\r\n";
+        }
     }
     else {
-        txt << L"Boot Record\tнет ❌\r\n";
+        txt << L"Boot Record\t" << yesno(false) << L"\r\n";
     }
-    if (sum.biosBoot && sum.uefiBoot) txt << L"Тип загрузки\tBIOS и UEFI\r\n";
-    else if (sum.biosBoot)            txt << L"Тип загрузки\tBIOS\r\n";
-    else if (sum.uefiBoot)            txt << L"Тип загрузки\tUEFI\r\n";
-    else                               txt << L"Тип загрузки\t—\r\n";
+    if (sum.biosBoot && sum.uefiBoot) txt << tr(L"Тип загрузки", L"Boot type") << L"\tBIOS + UEFI\r\n";
+    else if (sum.biosBoot)            txt << tr(L"Тип загрузки", L"Boot type") << L"\tBIOS\r\n";
+    else if (sum.uefiBoot)            txt << tr(L"Тип загрузки", L"Boot type") << L"\tUEFI\r\n";
+    else                               txt << tr(L"Тип загрузки", L"Boot type") << L"\t—\r\n";
 
-    txt << L"Загрузчик\t" << (sum.bootLoader.empty() ? L"не обнаружен ❔" : sum.bootLoader) << L"\r\n";
+    txt << tr(L"Загрузчик", L"Bootloader") << L"\t"
+        << (sum.bootLoader.empty() ? tr(L"не обнаружен ❔", L"not detected ❔") : sum.bootLoader.c_str()) << L"\r\n";
 
     if (linuxInfo.detected) {
         txt << repeat(L'─', 90) << L"\r\n";
         txt << L"🐧 Linux\t\r\n";
-        txt << L"Тип образа\t" << (linuxInfo.imageType.empty() ? L"Linux ISO" : linuxInfo.imageType) << L"\r\n";
-        txt << L"Дистрибутив\t" << linuxInfo.distro << L"\r\n";
+        txt << tr(L"Тип образа", L"Image type") << L"\t"
+            << (linuxInfo.imageType.empty() ? L"Linux ISO" : linuxInfo.imageType) << L"\r\n";
+        txt << tr(L"Дистрибутив", L"Distro") << L"\t" << linuxInfo.distro << L"\r\n";
         if (!linuxInfo.version.empty())
-            txt << L"Версия\t" << linuxInfo.version << L"\r\n";
+            txt << tr(L"Версия", L"Version") << L"\t" << linuxInfo.version << L"\r\n";
         if (!linuxInfo.flavor.empty())
-            txt << L"Вариант\t" << linuxInfo.flavor << L"\r\n";
+            txt << tr(L"Вариант", L"Flavor") << L"\t" << linuxInfo.flavor << L"\r\n";
         if (!linuxInfo.arch.empty())
-            txt << L"Архитектура\t" << linuxInfo.arch << L"\r\n";
+            txt << tr(L"Архитектура", L"Architecture") << L"\t" << linuxInfo.arch << L"\r\n";
         if (!linuxInfo.diskInfoLine.empty())
             txt << L".disk/info\t" << linuxInfo.diskInfoLine << L"\r\n";
         if (!linuxInfo.kernelPath.empty())
-            txt << L"Ядро\t" << linuxInfo.kernelPath << L"\r\n";
+            txt << tr(L"Ядро", L"Kernel") << L"\t" << linuxInfo.kernelPath << L"\r\n";
         if (!linuxInfo.squashfsPath.empty())
-            txt << L"Файловая система\t" << linuxInfo.squashfsPath << L"\r\n";
+            txt << tr(L"Файловая система", L"Filesystem") << L"\t" << linuxInfo.squashfsPath << L"\r\n";
     }
 
     if (winInfo.detected) {
         txt << repeat(L'─', 90) << L"\r\n";
         txt << L"🪟 Windows\t\r\n";
-        txt << L"Тип образа\t" << (winInfo.imageType.empty() ? L"Windows" : winInfo.imageType) << L"\r\n";
+        txt << tr(L"Тип образа", L"Image type") << L"\t"
+            << (winInfo.imageType.empty() ? L"Windows" : winInfo.imageType) << L"\r\n";
         if (!winInfo.productVersion.empty())
-            txt << L"Версия\t" << winInfo.productVersion << L"\r\n";
+            txt << tr(L"Версия", L"Version") << L"\t" << winInfo.productVersion << L"\r\n";
         if (!winInfo.buildNumber.empty())
-            txt << L"Сборка (build)\t" << winInfo.buildNumber << L"\r\n";
+            txt << tr(L"Сборка (build)", L"Build") << L"\t" << winInfo.buildNumber << L"\r\n";
         if (!winInfo.architecture.empty())
-            txt << L"Архитектура\t" << winInfo.architecture << L"\r\n";
+            txt << tr(L"Архитектура", L"Architecture") << L"\t" << winInfo.architecture << L"\r\n";
         if (!winInfo.channel.empty())
-            txt << L"Канал\t" << winInfo.channel << L"\r\n";
+            txt << tr(L"Канал", L"Channel") << L"\t" << winInfo.channel << L"\r\n";
         if (!winInfo.defaultLanguage.empty())
-            txt << L"Язык (основной)\t" << winInfo.defaultLanguage << L"\r\n";
+            txt << tr(L"Язык (основной)", L"Language (primary)") << L"\t" << winInfo.defaultLanguage << L"\r\n";
         if (winInfo.installImageSize)
             txt << L"install.wim/esd\t" << winInfo.installImagePath << L" (" << FormatFileSize(winInfo.installImageSize) << L")\r\n";
         if (winInfo.bootImageSize)
@@ -3247,53 +3484,51 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
             }
             txt << L"\r\n";
         }
-        if (!winInfo.editions.empty()) {
-            txt << L"Редакции (WIM)\t" << (int)winInfo.editions.size() << L" образ(ов)\r\n";
-            txt << L"#\tНазвание\tEditionID\tВерсия\r\n";
-            for (const auto& ed : winInfo.editions) {
-                txt << ed.index << L"\t"
-                    << (ed.displayName.empty() ? ed.name : ed.displayName) << L"\t"
-                    << (ed.editionId.empty() ? L"—" : ed.editionId) << L"\t"
-                    << (ed.version.empty() ? L"—" : ed.version);
-                if (!ed.arch.empty()) txt << L" (" << ed.arch << L")";
-                if (!ed.language.empty()) txt << L" [" << ed.language << L"]";
-                txt << L"\r\n";
-            }
+        // editions already listed at top — skip duplicate table
+        if (winInfo.editions.empty() && (winInfo.isInstallMedia || winInfo.bootImageSize)) {
+            txt << tr(L"Редакции", L"Editions") << L"\t"
+                << tr(L"не удалось прочитать XML из WIM/ESD", L"failed to read XML from WIM/ESD") << L"\r\n";
         }
-        else if (winInfo.isInstallMedia || winInfo.bootImageSize) {
-            txt << L"Редакции\tне удалось прочитать XML из WIM/ESD\r\n";
-        }
-        else if (sum.hasUDF && scan.totalFiles < 10) {
-            txt << L"Примечание\tфайлы в UDF-разделе; install.wim не найден в ISO9660-дереве\r\n";
-            txt << L"Подсказка\tдля AIO/кастомных ISO нужен полный UDF-обход (в работе)\r\n";
+        else if (winInfo.editions.empty() && sum.hasUDF && scan.totalFiles < 10) {
+            txt << tr(L"Примечание", L"Note") << L"\t"
+                << tr(L"файлы в UDF-разделе; install.wim не найден в ISO9660-дереве",
+                      L"files are in UDF; install.wim not found in ISO9660 tree") << L"\r\n";
         }
     }
 
     if (!scan.largestFiles.empty()) {
         txt << repeat(L'─', 90) << L"\r\n";
-        txt << L"📦 Крупнейшие файлы\tтоп-" << (int)scan.largestFiles.size() << L"\r\n";
-        txt << L"Путь\tРазмер\tТип\r\n";
+        txt << L"📦 " << tr(L"Крупнейшие файлы", L"Largest files") << L"\t"
+            << tr(L"топ-", L"top-") << (int)scan.largestFiles.size() << L"\r\n";
+        txt << tr(L"Путь", L"Path") << L"\t" << tr(L"Размер", L"Size") << L"\t" << tr(L"Тип", L"Type") << L"\r\n";
         for (const auto& lf : scan.largestFiles) {
             txt << lf.path << L"\t" << FormatFileSize(lf.size) << L"\tFILE\r\n";
         }
     }
 
-    txt << repeat(L'─', 90) << L"\r\n";
-    if (!sum.configHits.empty()) {
-        txt << L"📝 Конфигурационные файлы\tнайдено: " << (int)sum.configHits.size() << L"\r\n";
-        for (auto& p : sum.configHits) txt << L"\t" << p << L"\r\n";
-    }
-    else {
-        txt << L"📝 Конфигурационные файлы\tне найдены\r\n";
+    if (g_optVerbose || !sum.configHits.empty()) {
+        txt << repeat(L'─', 90) << L"\r\n";
+        if (!sum.configHits.empty()) {
+            txt << L"📝 " << tr(L"Конфигурационные файлы", L"Config files") << L"\t"
+                << tr(L"найдено:", L"found:") << L" " << (int)sum.configHits.size() << L"\r\n";
+            for (auto& p : sum.configHits) txt << L"\t" << p << L"\r\n";
+        }
+        else if (g_optVerbose) {
+            txt << L"📝 " << tr(L"Конфигурационные файлы", L"Config files") << L"\t"
+                << tr(L"не найдены", L"none found") << L"\r\n";
+        }
     }
 
     if (g_optShowFileList && !scan.fileList.empty()) {
         txt << repeat(L'─', 90) << L"\r\n";
-        txt << L"📁 Содержимое\tфайлов: " << scan.totalFiles << L", каталогов: " << scan.totalDirs;
+        txt << L"📁 " << tr(L"Содержимое", L"Contents") << L"\t"
+            << tr(L"файлов:", L"files:") << L" " << scan.totalFiles << L", "
+            << tr(L"каталогов:", L"dirs:") << L" " << scan.totalDirs;
         if ((int)scan.fileList.size() < scan.totalFiles + scan.totalDirs)
-            txt << L" (показано " << (int)scan.fileList.size() << L" из " << (scan.totalFiles + scan.totalDirs) << L")";
+            txt << L" (" << tr(L"показано", L"shown") << L" " << (int)scan.fileList.size()
+                << L" " << tr(L"из", L"of") << L" " << (scan.totalFiles + scan.totalDirs) << L")";
         txt << L"\r\n";
-        txt << L"Путь\tРазмер\tТип\r\n";
+        txt << tr(L"Путь", L"Path") << L"\t" << tr(L"Размер", L"Size") << L"\t" << tr(L"Тип", L"Type") << L"\r\n";
         for (const auto& fl : scan.fileList) {
             txt << fl.path << L"\t"
                 << (fl.isDir ? L"—" : FormatFileSize(fl.size)) << L"\t"
@@ -3306,11 +3541,11 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         bool v = false, hb = false, hu = false;
         if (sum.bootCatalogLBA && parse_boot_catalog(fr, sum.bootCatalogLBA, bootEntries2, v, hb, hu) && !bootEntries2.empty()) {
             txt << repeat(L'─', 90) << L"\r\n";
-            txt << L"📚 Boot Catalog — все записи\r\n";
-            txt << L"№\tПлатформа\tBootable\tMedia\tSegment\tSysType\tSectors\tLBA\r\n";
+            txt << L"📚 Boot Catalog — " << tr(L"все записи", L"all entries") << L"\r\n";
+            txt << L"#\t" << tr(L"Платформа", L"Platform") << L"\tBootable\tMedia\tSegment\tSysType\tSectors\tLBA\r\n";
             int idx = 1;
             for (const auto& be : bootEntries2) {
-                std::wstring boot = be.bootable ? L"yes ✅" : L"no ❌";
+                std::wstring boot = be.bootable ? yesno(true) : yesno(false);
                 std::wostringstream seg; seg << L"0x" << std::hex << std::uppercase << be.segment << std::dec;
                 std::wostringstream sys; sys << L"0x" << std::hex << std::uppercase << (int)be.sysType << std::dec;
                 txt << idx++ << L"\t"
@@ -3344,7 +3579,8 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
     }
     catch (...) {
         log_line(L"ListLoadW: generate_iso_report exception");
-        text = L"Ошибка\tНе удалось сформировать отчёт ❌\r\n";
+        text = std::wstring(tr(L"Ошибка", L"Error")) + L"\t"
+            + tr(L"Не удалось сформировать отчёт ❌", L"Failed to build report ❌") + L"\r\n";
     }
     sanitize_wstring_for_richedit(text);
     log_line(L"ListLoadW: report chars=%u quickView=%d", (unsigned)text.size(), quickView ? 1 : 0);
@@ -3400,8 +3636,11 @@ extern "C" HWND __stdcall ListLoad(HWND ParentWin, char* FileToLoad, int ShowFla
 
 // Detect: ISO/DMG — обычные файлы; IMG — MULTIMEDIA в TC, без этого флага плагин игнорируется.
 // IMG: MULTIMEDIA required by TC; no bare EXT="IMG" (would steal GEM/picture .img).
+// BIN: raw dumps; VHD/VHDX: Hyper-V images.
 static const char kIsoListerDetectString[] =
-    "EXT=\"ISO\" | EXT=\"DMG\" | "
+    "EXT=\"ISO\" | EXT=\"DMG\" | EXT=\"VHD\" | EXT=\"VHDX\" | "
+    "(EXT=\"BIN\" & [510]=85 & [511]=170) | "
+    "(EXT=\"BIN\" & SIZE>50000000) | "
     "(MULTIMEDIA & EXT=\"IMG\" & [510]=85 & [511]=170) | "
     "(MULTIMEDIA & EXT=\"IMG\" & [32769]=67 & [32770]=68 & [32771]=48 & [32772]=48 & [32773]=49) | "
     "(MULTIMEDIA & EXT=\"IMG\" & SIZE>50000000)";
@@ -3443,6 +3682,53 @@ extern "C" int __stdcall ListSendCommand(HWND ListWin, int Command, int Paramete
     return LISTPLUGIN_ERROR;
 }
 
+extern "C" int __stdcall ListSearchTextW(HWND ListWin, WCHAR* SearchString, int SearchParameter)
+{
+    if (!IsWindow(ListWin) || !SearchString || !SearchString[0])
+        return LISTPLUGIN_ERROR;
+
+    CHARRANGE sel{};
+    SendMessageW(ListWin, EM_EXGETSEL, 0, (LPARAM)&sel);
+
+    FINDTEXTEXW ft{};
+    ft.lpstrText = SearchString;
+    if (SearchParameter & lcs_findfirst) {
+        ft.chrg.cpMin = 0;
+        ft.chrg.cpMax = -1;
+    }
+    else if (SearchParameter & lcs_backwards) {
+        ft.chrg.cpMin = 0;
+        ft.chrg.cpMax = sel.cpMin;
+    }
+    else {
+        ft.chrg.cpMin = sel.cpMax;
+        ft.chrg.cpMax = -1;
+    }
+
+    DWORD flags = 0;
+    if (!(SearchParameter & lcs_backwards)) flags |= FR_DOWN;
+    if (SearchParameter & lcs_matchcase) flags |= FR_MATCHCASE;
+    if (SearchParameter & lcs_wholewords) flags |= FR_WHOLEWORD;
+
+    LRESULT pos = SendMessageW(ListWin, EM_FINDTEXTEXW, flags, (LPARAM)&ft);
+    if (pos < 0) return LISTPLUGIN_ERROR;
+
+    SendMessageW(ListWin, EM_EXSETSEL, 0, (LPARAM)&ft.chrgText);
+    SendMessageW(ListWin, EM_SCROLLCARET, 0, 0);
+    return LISTPLUGIN_OK;
+}
+
+extern "C" int __stdcall ListSearchText(HWND ListWin, char* SearchString, int SearchParameter)
+{
+    if (!SearchString) return LISTPLUGIN_ERROR;
+    int wlen = MultiByteToWideChar(CP_ACP, 0, SearchString, -1, nullptr, 0);
+    if (wlen <= 0) return LISTPLUGIN_ERROR;
+    std::wstring w((size_t)wlen, L'\0');
+    MultiByteToWideChar(CP_ACP, 0, SearchString, -1, &w[0], wlen);
+    if (!w.empty() && w.back() == L'\0') w.pop_back();
+    return ListSearchTextW(ListWin, w.empty() ? (WCHAR*)L"" : &w[0], SearchParameter);
+}
+
 extern "C" void __stdcall ListSetDefaultParams(ListDefaultParamStruct* dps)
 {
     if (dps && dps->DefaultIniName && dps->DefaultIniName[0]) {
@@ -3482,8 +3768,9 @@ int wmain(int argc, wchar_t** argv) {
         fwprintf(stderr, L"VERIFY FAIL: unknown report type\n");
         return 1;
     }
-    if (isIso && report.find(L"Volume ID") == std::wstring::npos) {
-        fwprintf(stderr, L"VERIFY FAIL: missing 'Volume ID'\n");
+    if (isIso && report.find(L"ISO 9660") == std::wstring::npos &&
+        report.find(L"FS type") == std::wstring::npos && report.find(L"Тип ФС") == std::wstring::npos) {
+        fwprintf(stderr, L"VERIFY FAIL: missing ISO summary markers\n");
         return 1;
     }
     if (isDisk && report.find(L"Разметка диска") == std::wstring::npos) {

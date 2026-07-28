@@ -6,3 +6,5 @@ EXPORTS
     ListCloseWindow
     ListSetDefaultParams
     ListSendCommand
+    ListSearchText
+    ListSearchTextW
