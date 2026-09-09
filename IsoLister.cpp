@@ -45,34 +45,6 @@ extern "C" {
 #endif
 
 // -----------------------------------------------------------------------------
-// Логирование (в %TEMP%\IsoLister.log)
-// -----------------------------------------------------------------------------
-#define ISO_DEBUG_LOG 1
-#if ISO_DEBUG_LOG
-static void log_line(const wchar_t* fmt, ...) {
-    wchar_t path[MAX_PATH]; GetTempPathW(MAX_PATH, path);
-    StringCchCatW(path, MAX_PATH, L"IsoLister.log");
-    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return;
-    wchar_t buf[4096];
-    va_list ap; va_start(ap, fmt);
-    StringCchVPrintfW(buf, 4096, fmt, ap);
-    va_end(ap);
-    DWORD cb;
-    LARGE_INTEGER zero = {}, cur = {};
-    SetFilePointerEx(h, zero, &cur, FILE_END);
-    if (cur.QuadPart == 0) { const WORD bom = 0xFEFF; DWORD wcb = 2; WriteFile(h, &bom, 2, &wcb, nullptr); }
-    WriteFile(h, buf, (DWORD)(lstrlenW(buf) * sizeof(wchar_t)), &cb, nullptr);
-    const wchar_t* nl = L"\r\n";
-    WriteFile(h, nl, (DWORD)(lstrlenW(nl) * sizeof(wchar_t)), &cb, nullptr);
-    CloseHandle(h);
-}
-#else
-#define log_line(...) do{}while(0)
-#endif
-
-// -----------------------------------------------------------------------------
 // Глобальные настройки/состояние
 // -----------------------------------------------------------------------------
 static HINSTANCE g_hInst = nullptr;
@@ -99,6 +71,37 @@ static int g_optShowBootEntries = 0;
 static int g_optShowFileList = 0;
 static int g_optMaxFileList = 1000;
 static int g_optFullScan = 0;
+static int g_optDebugLog =
+#ifdef _DEBUG
+    1
+#else
+    0
+#endif
+;
+
+// -----------------------------------------------------------------------------
+// Логирование (в %TEMP%\IsoLister.log)
+// -----------------------------------------------------------------------------
+static void log_line(const wchar_t* fmt, ...) {
+    if (!g_optDebugLog) return;
+    wchar_t path[MAX_PATH]; GetTempPathW(MAX_PATH, path);
+    StringCchCatW(path, MAX_PATH, L"IsoLister.log");
+    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    wchar_t buf[4096];
+    va_list ap; va_start(ap, fmt);
+    StringCchVPrintfW(buf, 4096, fmt, ap);
+    va_end(ap);
+    DWORD cb;
+    LARGE_INTEGER zero = {}, cur = {};
+    SetFilePointerEx(h, zero, &cur, FILE_END);
+    if (cur.QuadPart == 0) { const WORD bom = 0xFEFF; DWORD wcb = 2; WriteFile(h, &bom, 2, &wcb, nullptr); }
+    WriteFile(h, buf, (DWORD)(lstrlenW(buf) * sizeof(wchar_t)), &cb, nullptr);
+    const wchar_t* nl = L"\r\n";
+    WriteFile(h, nl, (DWORD)(lstrlenW(nl) * sizeof(wchar_t)), &cb, nullptr);
+    CloseHandle(h);
+}
 
 // Таб‑позиции (в "знаках", конвертируем в twips по шрифту)
 static const int TAB_MAIN_1 = 26;   // поле → значение
@@ -2668,12 +2671,14 @@ static void load_options_from_ini_file(const wchar_t* iniPath) {
     int showF = GetPrivateProfileIntW(L"IsoLister", L"ShowFileList", g_optShowFileList, iniPath);
     int maxF = GetPrivateProfileIntW(L"IsoLister", L"MaxFileList", g_optMaxFileList, iniPath);
     int fullScan = GetPrivateProfileIntW(L"IsoLister", L"FullScan", g_optFullScan, iniPath);
+    int dbg = GetPrivateProfileIntW(L"IsoLister", L"DebugLog", g_optDebugLog, iniPath);
     g_optDepth = (depth > 0 && depth <= 32) ? depth : g_optDepth;
     g_optMaxNodes = (maxN >= 1000 && maxN <= 1000000) ? maxN : g_optMaxNodes;
     g_optShowBootEntries = (showB != 0) ? 1 : 0;
     g_optShowFileList = (showF != 0) ? 1 : 0;
     g_optMaxFileList = (maxF >= 50 && maxF <= 100000) ? maxF : g_optMaxFileList;
     g_optFullScan = (fullScan != 0) ? 1 : 0;
+    g_optDebugLog = (dbg != 0) ? 1 : 0;
 }
 
 static void load_options_from_ini() {
@@ -2687,8 +2692,8 @@ static void load_options_from_ini() {
         if (_wcsicmp(wincmd, g_iniPath.c_str()) != 0)
             load_options_from_ini_file(wincmd);
     }
-    log_line(L"Options: ScanDepth=%d, MaxNodes=%d, ShowBootEntries=%d, ShowFileList=%d, MaxFileList=%d, FullScan=%d",
-        g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList, g_optFullScan);
+    log_line(L"Options: ScanDepth=%d, MaxNodes=%d, ShowBootEntries=%d, ShowFileList=%d, MaxFileList=%d, FullScan=%d, DebugLog=%d",
+        g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList, g_optFullScan, g_optDebugLog);
 }
 
 // -----------------------------------------------------------------------------
