@@ -1514,15 +1514,22 @@ struct WimDiscovery {
     uint64_t estimatedSize = 0;
 };
 
+// _WIMHEADER_V1_PACKED: GUID 0x18 (16 bytes), usPartNumber 0x28, usTotalParts 0x2A,
+// dwImageCount 0x2C. 0x1C is inside the GUID — do not use it as image count.
+static const size_t WIM_OFF_IMAGE_COUNT = 0x2C;
+static const uint32_t WIM_FLAG_COMPRESS_LZMS = 0x00080000;
+
 static bool wim_header_looks_valid(const uint8_t* hdr) {
     if (memcmp(hdr, "MSWIM", 5) != 0) return false;
     if (rd_le32(hdr + 8) != 208) return false;
-    uint32_t imgCount = rd_le32(hdr + 0x1C);
+    uint32_t imgCount = rd_le32(hdr + WIM_OFF_IMAGE_COUNT);
     if (imgCount == 0 || imgCount > 40) return false;
     uint64_t xmlOff = rd_le64(hdr + 80);
     uint64_t xmlLen = rd_le64(hdr + 88);
     if (xmlLen < 64 || xmlLen > 32 * 1024 * 1024) return false;
-    if (xmlOff < 208 || xmlOff > 512 * 1024 * 1024ULL) return false;
+    // XML sits at the end of the WIM; install.wim is typically several GiB.
+    // Do not cap xmlOff at 512 MiB — that rejects real images.
+    if (xmlOff < 208) return false;
     return true;
 }
 
@@ -1550,7 +1557,7 @@ static void discover_wim_by_signature_scan(FileReader& fr, uint64_t isoSize, std
 
             WimDiscovery wd{};
             wd.offset = start;
-            wd.imageCount = rd_le32(hdr + 0x1C);
+            wd.imageCount = rd_le32(hdr + WIM_OFF_IMAGE_COUNT);
             wd.estimatedSize = chunk;
             out.push_back(wd);
         }
@@ -2928,20 +2935,18 @@ static std::wstring generate_bare_wim_report(const wchar_t* FileToLoad, FileRead
     std::wstring ext = GetFileExtensionLower(FileToLoad);
     txt << L"Расширение\t" << (ext.empty() ? L"—" : ext) << L"\r\n";
 
-    bool isEsd = (ext == L"esd");
-    txt << L"Тип образа\t🪟 Windows Imaging (" << (isEsd ? L"ESD" : L"WIM") << L")\r\n";
-    txt << repeat(L'─', 90) << L"\r\n";
-
     uint8_t hdr[208]{};
     bool hdrOk = fr.size_bytes() >= 208 && fr.read_at(0, hdr, 208);
     bool magicOk = hdrOk && wim_header_looks_valid(hdr);
 
     if (!hdrOk) {
+        txt << L"Тип образа\t🪟 Windows Imaging (" << (ext == L"esd" ? L"ESD" : L"WIM") << L")\r\n";
         txt << L"Ошибка\tНе удалось прочитать заголовок WIM/ESD ❌\r\n";
         return txt.str();
     }
     if (!magicOk) {
-        bool hasMswim = hdrOk && memcmp(hdr, "MSWIM", 5) == 0;
+        txt << L"Тип образа\t🪟 Windows Imaging (" << (ext == L"esd" ? L"ESD" : L"WIM") << L")\r\n";
+        bool hasMswim = memcmp(hdr, "MSWIM", 5) == 0;
         if (hasMswim)
             txt << L"Ошибка\tСигнатура MSWIM найдена, но заголовок некорректен ❌\r\n";
         else
@@ -2949,14 +2954,17 @@ static std::wstring generate_bare_wim_report(const wchar_t* FileToLoad, FileRead
         return txt.str();
     }
 
+    uint32_t flags = rd_le32(hdr + 16);
+    bool isEsd = (ext == L"esd") || (flags & WIM_FLAG_COMPRESS_LZMS) != 0;
+    txt << L"Тип образа\t🪟 Windows Imaging (" << (isEsd ? L"ESD" : L"WIM") << L")\r\n";
+    txt << repeat(L'─', 90) << L"\r\n";
     txt << L"Формат\tMSWIM " << wim_format_version(hdr) << L" ✅\r\n";
 
-    uint32_t flags = rd_le32(hdr + 16);
     std::wstring flagsStr = wim_flags_summary(flags);
     if (!flagsStr.empty())
         txt << L"Флаги\t" << flagsStr << L" (0x" << std::hex << std::uppercase << flags << std::dec << L")\r\n";
 
-    uint32_t hdrImageCount = rd_le32(hdr + 0x1C);
+    uint32_t hdrImageCount = rd_le32(hdr + WIM_OFF_IMAGE_COUNT);
     txt << L"Число образов (заголовок)\t" << hdrImageCount << L"\r\n";
 
     std::vector<WimImageInfo> editions;
