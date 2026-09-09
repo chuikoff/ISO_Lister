@@ -2898,6 +2898,112 @@ static void SubclassRichEdit(HWND hwnd)
 
 
 
+static std::wstring wim_flags_summary(uint32_t flags) {
+    std::wstring s;
+    auto add = [&](const wchar_t* bit) {
+        if (!s.empty()) s += L", ";
+        s += bit;
+    };
+    if (flags & 0x00000002) add(L"compressed");
+    if (flags & 0x00000004) add(L"read-only");
+    if (flags & 0x00000008) add(L"spanned");
+    if (flags & 0x00000010) add(L"resource-only");
+    if (flags & 0x00000020) add(L"metadata-only");
+    if (flags & 0x00000040) add(L"write-in-progress");
+    if (flags & 0x00000080) add(L"rp-fix");
+    if (flags & 0x00020000) add(L"XPRESS");
+    if (flags & 0x00040000) add(L"LZX");
+    if (flags & 0x00080000) add(L"LZMS");
+    return s;
+}
+
+static std::wstring generate_bare_wim_report(const wchar_t* FileToLoad, FileReader& fr) {
+    std::wostringstream txt;
+    txt << L"🔌 IsoLister\tv" << ISO_LISTER_VERSION_WSTR << L" (" << ISO_LISTER_GIT_SHA_WSTR << L")\r\n";
+    txt << L"Сборка\t" << ISO_LISTER_BUILD_TIMESTAMP_WSTR << L"\r\n";
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"📄 Файл\t" << FileToLoad << L"\r\n";
+    txt << L"Размер файла\t" << FormatFileSize(fr.size_bytes()) << L"\r\n";
+
+    std::wstring ext = GetFileExtensionLower(FileToLoad);
+    txt << L"Расширение\t" << (ext.empty() ? L"—" : ext) << L"\r\n";
+
+    bool isEsd = (ext == L"esd");
+    txt << L"Тип образа\t🪟 Windows Imaging (" << (isEsd ? L"ESD" : L"WIM") << L")\r\n";
+    txt << repeat(L'─', 90) << L"\r\n";
+
+    uint8_t hdr[208]{};
+    bool hdrOk = fr.size_bytes() >= 208 && fr.read_at(0, hdr, 208);
+    bool magicOk = hdrOk && wim_header_looks_valid(hdr);
+
+    if (!hdrOk) {
+        txt << L"Ошибка\tНе удалось прочитать заголовок WIM/ESD ❌\r\n";
+        return txt.str();
+    }
+    if (!magicOk) {
+        bool hasMswim = hdrOk && memcmp(hdr, "MSWIM", 5) == 0;
+        if (hasMswim)
+            txt << L"Ошибка\tСигнатура MSWIM найдена, но заголовок некорректен ❌\r\n";
+        else
+            txt << L"Ошибка\tСигнатура MSWIM не найдена ❌\r\n";
+        return txt.str();
+    }
+
+    txt << L"Формат\tMSWIM " << wim_format_version(hdr) << L" ✅\r\n";
+
+    uint32_t flags = rd_le32(hdr + 16);
+    std::wstring flagsStr = wim_flags_summary(flags);
+    if (!flagsStr.empty())
+        txt << L"Флаги\t" << flagsStr << L" (0x" << std::hex << std::uppercase << flags << std::dec << L")\r\n";
+
+    uint32_t hdrImageCount = rd_le32(hdr + 0x1C);
+    txt << L"Число образов (заголовок)\t" << hdrImageCount << L"\r\n";
+
+    std::vector<WimImageInfo> editions;
+    bool xmlOk = parse_wim_at_offset(fr, 0, fr.size_bytes(), editions);
+    if (!xmlOk || editions.empty()) {
+        txt << L"Ошибка\tНе удалось прочитать XML метаданные WIM/ESD ❌\r\n";
+        txt << L"Редакции\tне удалось разобрать\r\n";
+        return txt.str();
+    }
+
+    txt << L"Число образов (XML)\t" << (int)editions.size() << L"\r\n";
+
+    const WimImageInfo* best = &editions[0];
+    for (const auto& e : editions) {
+        std::wstring n = ToLower(e.displayName + e.name);
+        if (n.find(L"windows") != std::wstring::npos &&
+            n.find(L"setup") == std::wstring::npos &&
+            n.find(L"pe") == std::wstring::npos) {
+            best = &e;
+            break;
+        }
+    }
+
+    std::wstring product = guess_windows_product_name(editions);
+    if (!product.empty())
+        txt << L"Detected\t" << product << L"\r\n";
+    if (!best->version.empty())
+        txt << L"Сборка (build)\t" << best->version << L"\r\n";
+    if (!best->arch.empty())
+        txt << L"Архитектура\t" << best->arch << L"\r\n";
+    if (!best->language.empty())
+        txt << L"Язык (основной)\t" << best->language << L"\r\n";
+
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"🪟 Редакции (WIM)\t" << (int)editions.size() << L" образ(ов)\r\n";
+    txt << L"#\tНазвание\tEditionID\tВерсия\tАрхитектура\tЯзык\r\n";
+    for (const auto& ed : editions) {
+        txt << ed.index << L"\t"
+            << (ed.displayName.empty() ? (ed.name.empty() ? L"—" : ed.name) : ed.displayName) << L"\t"
+            << (ed.editionId.empty() ? L"—" : ed.editionId) << L"\t"
+            << (ed.version.empty() ? L"—" : ed.version) << L"\t"
+            << (ed.arch.empty() ? L"—" : ed.arch) << L"\t"
+            << (ed.language.empty() ? L"—" : ed.language) << L"\r\n";
+    }
+    return txt.str();
+}
+
 static std::wstring generate_iso_report(const wchar_t* FileToLoad)
 {
     std::wostringstream txt;
@@ -2917,6 +3023,15 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
         return txt.str();
     }
 
+    {
+        std::wstring ext = GetFileExtensionLower(FileToLoad);
+        bool wantWim = (ext == L"wim" || ext == L"esd");
+        uint8_t hdrPeek[208]{};
+        bool looksWim = fr.size_bytes() >= 208 && fr.read_at(0, hdrPeek, 208) && wim_header_looks_valid(hdrPeek);
+        if (wantWim || looksWim)
+            return generate_bare_wim_report(FileToLoad, fr);
+    }
+
     UINT detectedSector = DEFAULT_SECTOR_SIZE;
     if (!probe_iso_layout(fr, detectedSector)) {
         UdIfInfo dmg;
@@ -2925,7 +3040,7 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad)
         DiskImageInfo disk;
         if (probe_disk_image(fr, disk))
             return generate_disk_image_report(FileToLoad, fr, disk);
-        txt << L"Ошибка\tНе обнаружена сигнатура ISO9660, UDIF (.dmg) и разметка диска (MBR/GPT) ❌\r\n";
+        txt << L"Ошибка\tНе обнаружена сигнатура ISO9660, UDIF (.dmg), WIM/ESD и разметка диска (MBR/GPT) ❌\r\n";
         txt << L"Размер файла\t" << FormatFileSize(fr.size_bytes()) << L"\r\n";
         txt << L"Расширение\t" << GetFileExtensionLower(FileToLoad) << L"\r\n";
         return txt.str();
@@ -3350,9 +3465,9 @@ extern "C" HWND __stdcall ListLoad(HWND ParentWin, char* FileToLoad, int ShowFla
     return ListLoadW(ParentWin, &w[0], ShowFlags);
 }
 
-// Detect: ISO/DMG по расширению; IMG — только образ диска/ISO, не GEM/графика (конфликт MULTIMEDIA).
+// Detect: ISO/DMG/WIM/ESD по расширению; IMG — только образ диска/ISO, не GEM/графика (конфликт MULTIMEDIA).
 static const char kIsoListerDetectString[] =
-    "EXT=\"ISO\" | EXT=\"DMG\" | "
+    "EXT=\"ISO\" | EXT=\"DMG\" | EXT=\"WIM\" | EXT=\"ESD\" | "
     "(EXT=\"IMG\" & [510]=85 & [511]=170) | "
     "(EXT=\"IMG\" & [32769]=67 & [32770]=68 & [32771]=48 & [32772]=48 & [32773]=49) | "
     "(EXT=\"IMG\" & SIZE>50000000)";

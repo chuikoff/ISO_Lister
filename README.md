@@ -2,12 +2,13 @@
 
 WLX Lister-плагин для [Total Commander](https://www.ghisler.com/) — быстрый анализ ISO-образов прямо в панели просмотра (F3), в духе Rufus.
 
-Показывает тип файловой системы, загрузочность (El Torito), UEFI/BIOS, метаданные Windows и Linux, версию install.wim/esd, издания и многое другое.
+Показывает тип файловой системы, загрузочность (El Torito), UEFI/BIOS, метаданные Windows и Linux, версию install.wim/esd, издания, а также отчёт по «голым» `.wim` / `.esd` (F3) и многое другое.
 
 ## Возможности
 
 - **Быстрый режим по умолчанию** — анализ 2–4 ГБ ISO за ~100–150 мс (точечный поиск путей вместо полного обхода дерева)
 - **Windows** — UDF (современные установочные ISO), install.wim/esd, boot.wim, ei.cfg, издания, build, архитектура, подпись UEFI bootmgr
+- **WIM/ESD** — просмотр standalone `install.wim` / `boot.wim` / `.esd`: формат MSWIM, число образов, таблица редакций
 - **Linux** — Ubuntu/Debian и др.: `/.disk/info`, casper, GRUB, ISOLINUX
 - **macOS** — Apple UDIF `.dmg`: разделы GPT, Apple_HFS/APFS, EFI, версия установщика
 - **ISO 9660** — Joliet, Rock Ridge, PVD/SVD, Boot Catalog
@@ -18,7 +19,7 @@ WLX Lister-плагин для [Total Commander](https://www.ghisler.com/) — �
 1. Скачайте архив из [релизов](https://github.com/chuikoff/ISO_Lister/releases) под вашу разрядность TC:
    - **64-bit TC** → `ISO_Lister_*_wlx64.zip`
    - **32-bit TC** → `ISO_Lister_*_wlx.zip`  
-   Поддерживаются расширения: `.iso`, `.img`, `.dmg`
+   Поддерживаются расширения: `.iso`, `.img`, `.dmg`, `.wim`, `.esd`
 
 ### `.img` не открывается плагином (конфликт с Imagine / mthumbs)
 
@@ -30,7 +31,7 @@ Total Commander считает `.img` **мультимедиа** (формат �
 2. Detect string (уже в плагине v1.1.4+):
 
    ```
-   EXT="ISO" | EXT="DMG" | (EXT="IMG" & [510]=85 & [511]=170) | (EXT="IMG" & [32769]=67 & [32770]=68 & [32771]=48 & [32772]=48 & [32773]=49) | (EXT="IMG" & SIZE>50000000)
+   EXT="ISO" | EXT="DMG" | EXT="WIM" | EXT="ESD" | (EXT="IMG" & [510]=85 & [511]=170) | (EXT="IMG" & [32769]=67 & [32770]=68 & [32771]=48 & [32772]=48 & [32773]=49) | (EXT="IMG" & SIZE>50000000)
    ```
 
    Это ловит MBR (55 AA), ISO9660 (CD001) и крупные образы (>50 МБ), но не маленькие `.img`-картинки.
@@ -39,7 +40,7 @@ Total Commander считает `.img` **мультимедиа** (формат �
 2. Откройте архив в Total Commander — TC предложит автоматическую установку (`pluginst.inf`).
    Либо вручную распакуйте в `%TOTALCMD%\Plugins\wlx\ISO_Lister\`.
 3. Перезапустите Total Commander.
-4. Откройте любой `.iso` и нажмите **F3** (Lister).
+4. Откройте любой `.iso`, `.wim` или `.esd` и нажмите **F3** (Lister).
 
 ## Настройки
 
