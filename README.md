@@ -18,6 +18,7 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 | `.img` | Raw-образ диска | MBR/GPT, разделы, FAT/NTFS, загрузочный код |
 | `.bin` | Raw dump | То же, что `.img` (MBR/GPT по сигнатурам / размеру) |
 | `.vhd` / `.vhdx` | Hyper-V | Метаданные VHD; fixed VHD — разбор MBR/GPT |
+| `.wim` / `.esd` | Windows Imaging | Standalone WIM/ESD: MSWIM, число образов, таблица редакций |
 | `.dmg` | Apple UDIF | koly/blkx, GPT, HFS+/APFS, EFI, версия установщика macOS |
 
 ### Что показывает отчёт
@@ -39,11 +40,11 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 
 ### Установка
 
-1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.6.zip`.
+1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.9.zip`.
 2. Откройте архив в Total Commander — появится диалог автоустановки (`pluginst.inf`).
 3. Путь по умолчанию: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Полностью перезапустите Total Commander.**
-5. Откройте `.iso` / `.img` / `.dmg` → **F3** или **Ctrl+Q**.
+5. Откройте `.iso` / `.img` / `.dmg` / `.wim` / `.esd` → **F3** или **Ctrl+Q**.
 
 В архиве оба варианта плагина: `IsoLister.wlx` (32-bit TC) и `IsoLister.wlx64` (64-bit TC); TC выбирает нужный автоматически.
 
@@ -137,6 +138,7 @@ MIT — см. [LICENSE](LICENSE).
 | `.img` | Raw disk image | MBR/GPT, partitions, FAT/NTFS, boot code |
 | `.bin` | Raw dump | Same as `.img` (MBR/GPT by signature / size) |
 | `.vhd` / `.vhdx` | Hyper-V | VHD metadata; fixed VHD — MBR/GPT layout |
+| `.wim` / `.esd` | Windows Imaging | Standalone WIM/ESD: MSWIM, image count, editions table |
 | `.dmg` | Apple UDIF | koly/blkx, GPT, HFS+/APFS, EFI, macOS installer version |
 
 ### Report contents
@@ -158,11 +160,11 @@ MIT — см. [LICENSE](LICENSE).
 
 ### Installation
 
-1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.6.zip`.
+1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.9.zip`.
 2. Open the ZIP in Total Commander — auto-install dialog appears (`pluginst.inf`).
 3. Default path: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Restart Total Commander completely.**
-5. Open `.iso` / `.img` / `.dmg` → **F3** or **Ctrl+Q**.
+5. Open `.iso` / `.img` / `.dmg` / `.wim` / `.esd` → **F3** or **Ctrl+Q**.
 
 The package includes both `IsoLister.wlx` (32-bit TC) and `IsoLister.wlx64` (64-bit TC); TC picks the correct one.
 

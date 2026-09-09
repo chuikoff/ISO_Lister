@@ -1729,15 +1729,21 @@ struct WimDiscovery {
     uint64_t estimatedSize = 0;
 };
 
+// _WIMHEADER_V1_PACKED: GUID 0x18 (16 bytes), usPartNumber 0x28, usTotalParts 0x2A,
+// dwImageCount 0x2C. 0x1C is inside the GUID — do not use it as image count.
+static const size_t WIM_OFF_IMAGE_COUNT = 0x2C;
+static const uint32_t WIM_FLAG_COMPRESS_LZMS = 0x00080000;
+
 static bool wim_header_looks_valid(const uint8_t* hdr) {
     if (memcmp(hdr, "MSWIM", 5) != 0) return false;
     if (rd_le32(hdr + 8) != 208) return false;
-    uint32_t imgCount = rd_le32(hdr + 0x1C);
+    uint32_t imgCount = rd_le32(hdr + WIM_OFF_IMAGE_COUNT);
     if (imgCount == 0 || imgCount > 40) return false;
     uint64_t xmlOff = rd_le64(hdr + 80);
     uint64_t xmlLen = rd_le64(hdr + 88);
     if (xmlLen < 64 || xmlLen > 32 * 1024 * 1024) return false;
-    if (xmlOff < 208 || xmlOff > 512 * 1024 * 1024ULL) return false;
+    // XML sits at EOF; install.wim is typically several GiB — no 512 MiB xmlOff cap.
+    if (xmlOff < 208) return false;
     return true;
 }
 
@@ -1769,7 +1775,7 @@ static void discover_wim_by_signature_scan(FileReader& fr, uint64_t isoSize, std
 
             WimDiscovery wd{};
             wd.offset = start;
-            wd.imageCount = rd_le32(hdr + 0x1C);
+            wd.imageCount = rd_le32(hdr + WIM_OFF_IMAGE_COUNT);
             wd.estimatedSize = chunk;
             out.push_back(wd);
         }
@@ -3167,6 +3173,117 @@ static void SubclassRichEdit(HWND hwnd) {
 
 
 
+static std::wstring wim_flags_summary(uint32_t flags) {
+    std::wstring s;
+    auto add = [&](const wchar_t* bit) {
+        if (!s.empty()) s += L", ";
+        s += bit;
+    };
+    if (flags & 0x00000002) add(L"compressed");
+    if (flags & 0x00000004) add(L"read-only");
+    if (flags & 0x00000008) add(L"spanned");
+    if (flags & 0x00000010) add(L"resource-only");
+    if (flags & 0x00000020) add(L"metadata-only");
+    if (flags & 0x00000040) add(L"write-in-progress");
+    if (flags & 0x00000080) add(L"rp-fix");
+    if (flags & 0x00020000) add(L"XPRESS");
+    if (flags & 0x00040000) add(L"LZX");
+    if (flags & 0x00080000) add(L"LZMS");
+    return s;
+}
+
+static std::wstring generate_bare_wim_report(const wchar_t* FileToLoad, FileReader& fr) {
+    std::wostringstream txt;
+    std::wstring ext = GetFileExtensionLower(FileToLoad);
+
+    uint8_t hdr[208]{};
+    bool hdrOk = fr.size_bytes() >= 208 && fr.read_at(0, hdr, 208);
+    bool magicOk = hdrOk && wim_header_looks_valid(hdr);
+
+    auto typeLabel = [&](bool esd) {
+        return esd ? L"Windows Imaging (ESD)" : L"Windows Imaging (WIM)";
+    };
+
+    if (!hdrOk) {
+        txt << tr(L"Тип образа", L"Image type") << L"\t🪟 " << typeLabel(ext == L"esd") << L"\r\n";
+        txt << tr(L"Ошибка", L"Error") << L"\t"
+            << tr(L"Не удалось прочитать заголовок WIM/ESD ❌", L"Failed to read WIM/ESD header ❌") << L"\r\n";
+        return txt.str();
+    }
+    if (!magicOk) {
+        txt << tr(L"Тип образа", L"Image type") << L"\t🪟 " << typeLabel(ext == L"esd") << L"\r\n";
+        bool hasMswim = memcmp(hdr, "MSWIM", 5) == 0;
+        txt << tr(L"Ошибка", L"Error") << L"\t"
+            << (hasMswim
+                ? tr(L"Сигнатура MSWIM найдена, но заголовок некорректен ❌",
+                     L"MSWIM signature found, but header is invalid ❌")
+                : tr(L"Сигнатура MSWIM не найдена ❌", L"MSWIM signature not found ❌"))
+            << L"\r\n";
+        return txt.str();
+    }
+
+    uint32_t flags = rd_le32(hdr + 16);
+    bool isEsd = (ext == L"esd") || (flags & WIM_FLAG_COMPRESS_LZMS) != 0;
+    txt << tr(L"Тип образа", L"Image type") << L"\t🪟 " << typeLabel(isEsd) << L"\r\n";
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << tr(L"Формат", L"Format") << L"\tMSWIM " << wim_format_version(hdr) << L" ✅\r\n";
+
+    std::wstring flagsStr = wim_flags_summary(flags);
+    if (!flagsStr.empty())
+        txt << tr(L"Флаги", L"Flags") << L"\t" << flagsStr << L" (0x"
+            << std::hex << std::uppercase << flags << std::dec << L")\r\n";
+
+    uint32_t hdrImageCount = rd_le32(hdr + WIM_OFF_IMAGE_COUNT);
+    txt << tr(L"Число образов (заголовок)", L"Image count (header)") << L"\t" << hdrImageCount << L"\r\n";
+
+    std::vector<WimImageInfo> editions;
+    bool xmlOk = parse_wim_at_offset(fr, 0, fr.size_bytes(), editions);
+    if (!xmlOk || editions.empty()) {
+        txt << tr(L"Ошибка", L"Error") << L"\t"
+            << tr(L"Не удалось прочитать XML метаданные WIM/ESD ❌", L"Failed to parse WIM/ESD XML metadata ❌") << L"\r\n";
+        return txt.str();
+    }
+
+    txt << tr(L"Число образов (XML)", L"Image count (XML)") << L"\t" << (int)editions.size() << L"\r\n";
+
+    const WimImageInfo* best = &editions[0];
+    for (const auto& e : editions) {
+        std::wstring n = ToLower(e.displayName + e.name);
+        if (n.find(L"windows") != std::wstring::npos &&
+            n.find(L"setup") == std::wstring::npos &&
+            n.find(L"pe") == std::wstring::npos) {
+            best = &e;
+            break;
+        }
+    }
+
+    std::wstring product = guess_windows_product_name(editions);
+    if (!product.empty())
+        txt << tr(L"Обнаружено", L"Detected") << L"\t" << product << L"\r\n";
+    if (!best->version.empty())
+        txt << tr(L"Сборка (build)", L"Build") << L"\t" << best->version << L"\r\n";
+    if (!best->arch.empty())
+        txt << tr(L"Архитектура", L"Architecture") << L"\t" << best->arch << L"\r\n";
+    if (!best->language.empty())
+        txt << tr(L"Язык (основной)", L"Primary language") << L"\t" << best->language << L"\r\n";
+
+    txt << repeat(L'─', 90) << L"\r\n";
+    txt << L"🪟 " << tr(L"Редакции (WIM)", L"WIM editions") << L"\t"
+        << (int)editions.size() << L" " << tr(L"образ(ов)", L"image(s)") << L"\r\n";
+    txt << L"#\t" << tr(L"Название", L"Name") << L"\tEditionID\t"
+        << tr(L"Версия", L"Version") << L"\t" << tr(L"Архитектура", L"Arch") << L"\t"
+        << tr(L"Язык", L"Language") << L"\r\n";
+    for (const auto& ed : editions) {
+        txt << ed.index << L"\t"
+            << (ed.displayName.empty() ? (ed.name.empty() ? L"—" : ed.name) : ed.displayName) << L"\t"
+            << (ed.editionId.empty() ? L"—" : ed.editionId) << L"\t"
+            << (ed.version.empty() ? L"—" : ed.version) << L"\t"
+            << (ed.arch.empty() ? L"—" : ed.arch) << L"\t"
+            << (ed.language.empty() ? L"—" : ed.language) << L"\r\n";
+    }
+    return txt.str();
+}
+
 static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
 {
     std::wostringstream txt;
@@ -3181,6 +3298,15 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         return txt.str();
     }
 
+    {
+        std::wstring ext = GetFileExtensionLower(FileToLoad);
+        bool wantWim = (ext == L"wim" || ext == L"esd");
+        uint8_t hdrPeek[208]{};
+        bool looksWim = fr.size_bytes() >= 208 && fr.read_at(0, hdrPeek, 208) && wim_header_looks_valid(hdrPeek);
+        if (wantWim || looksWim)
+            return generate_bare_wim_report(FileToLoad, fr);
+    }
+
     UINT detectedSector = DEFAULT_SECTOR_SIZE;
     if (!probe_iso_layout(fr, detectedSector)) {
         UdIfInfo dmg;
@@ -3193,8 +3319,8 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         if (probe_disk_image(fr, disk))
             return generate_disk_image_report(FileToLoad, fr, disk);
         txt << tr(L"Ошибка", L"Error") << L"\t"
-            << tr(L"Не обнаружена сигнатура ISO9660, UDIF (.dmg), VHD/VHDX и разметка диска (MBR/GPT) ❌",
-                  L"No ISO9660, UDIF (.dmg), VHD/VHDX or disk layout (MBR/GPT) signature found ❌") << L"\r\n";
+            << tr(L"Не обнаружена сигнатура ISO9660, UDIF (.dmg), WIM/ESD, VHD/VHDX и разметка диска (MBR/GPT) ❌",
+                  L"No ISO9660, UDIF (.dmg), WIM/ESD, VHD/VHDX or disk layout (MBR/GPT) signature found ❌") << L"\r\n";
         return txt.str();
     }
     fr.sectorSize = detectedSector;
@@ -3669,11 +3795,11 @@ extern "C" HWND __stdcall ListLoad(HWND ParentWin, char* FileToLoad, int ShowFla
     return ListLoadW(ParentWin, &w[0], ShowFlags);
 }
 
-// Detect: ISO/DMG — обычные файлы; IMG — MULTIMEDIA в TC, без этого флага плагин игнорируется.
+// Detect: ISO/DMG/WIM/ESD — обычные файлы; IMG — MULTIMEDIA в TC, без этого флага плагин игнорируется.
 // IMG: MULTIMEDIA required by TC; no bare EXT="IMG" (would steal GEM/picture .img).
 // BIN: raw dumps; VHD/VHDX: Hyper-V images.
 static const char kIsoListerDetectString[] =
-    "EXT=\"ISO\" | EXT=\"DMG\" | EXT=\"VHD\" | EXT=\"VHDX\" | "
+    "EXT=\"ISO\" | EXT=\"DMG\" | EXT=\"WIM\" | EXT=\"ESD\" | EXT=\"VHD\" | EXT=\"VHDX\" | "
     "(EXT=\"BIN\" & [510]=85 & [511]=170) | "
     "(EXT=\"BIN\" & SIZE>50000000) | "
     "(MULTIMEDIA & EXT=\"IMG\" & [510]=85 & [511]=170) | "
