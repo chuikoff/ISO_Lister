@@ -2,29 +2,54 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot -Parent
 
-$isoCandidates = @(
-    "D:\Backup\SSD\1\clonezilla-live-3.2.0-5-amd64.iso",
-    "D:\Backup\SSD\1\checkn1x-1.1.7.iso",
-    "C:\Program Files (x86)\VMware\VMware Player\darwin.iso"
-)
-
-$iso = $isoCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
-if (-not $iso) {
-    Write-Error "No test ISO found. Place an ISO at one of: $($isoCandidates -join ', ')"
+function Find-VcTools {
+    $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+    if (Test-Path $vswhere) {
+        $installPath = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>$null
+        if ($installPath) {
+            $vcvars = Join-Path $installPath "VC\Auxiliary\Build\vcvars64.bat"
+            $msbuild = Join-Path $installPath "MSBuild\Current\Bin\MSBuild.exe"
+            if ((Test-Path $vcvars) -and (Test-Path $msbuild)) {
+                return @{ Vcvars = $vcvars; MSBuild = $msbuild }
+            }
+        }
+    }
+    $fallbackRoot = Join-Path $env:ProgramFiles "Microsoft Visual Studio\2022\Community"
+    $vcvars = Join-Path $fallbackRoot "VC\Auxiliary\Build\vcvars64.bat"
+    $msbuild = Join-Path $fallbackRoot "MSBuild\Current\Bin\MSBuild.exe"
+    if ((Test-Path $vcvars) -and (Test-Path $msbuild)) {
+        return @{ Vcvars = $vcvars; MSBuild = $msbuild }
+    }
+    throw "vcvars64.bat / MSBuild not found. Install VS2022 C++ tools (vswhere or Community)."
 }
 
-$vcvars = "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
-if (-not (Test-Path $vcvars)) {
-    Write-Error "vcvars64.bat not found at $vcvars"
+function Find-TestIso {
+    if ($env:ISO_LISTER_TEST_ISO -and (Test-Path -LiteralPath $env:ISO_LISTER_TEST_ISO)) {
+        return (Resolve-Path -LiteralPath $env:ISO_LISTER_TEST_ISO).Path
+    }
+    $fixtureDirs = @(
+        (Join-Path $PSScriptRoot "fixtures"),
+        (Join-Path $root "fixtures")
+    )
+    foreach ($dir in $fixtureDirs) {
+        if (Test-Path $dir) {
+            $hit = Get-ChildItem -Path $dir -Filter *.iso -File -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($hit) { return $hit.FullName }
+        }
+    }
+    throw "No test ISO found. Set ISO_LISTER_TEST_ISO to an .iso path, or place a *.iso under test\fixtures\ or fixtures\."
 }
+
+$tools = Find-VcTools
+$iso = Find-TestIso
 
 $outDir = Join-Path $PSScriptRoot "out"
 New-Item -ItemType Directory -Force -Path $outDir | Out-Null
 $exe = Join-Path $outDir "IsoListerTest.exe"
 
 Write-Host "==> Building plugin (Release|x64)"
-& "${env:ProgramFiles}\Microsoft Visual Studio\2022\Community\MSBuild\Current\Bin\MSBuild.exe" `
-    (Join-Path $root "IsoLister.sln") /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo
+& $tools.MSBuild (Join-Path $root "IsoLister.sln") /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo
+if ($LASTEXITCODE -ne 0) { throw "MSBuild failed" }
 
 Write-Host "==> Building standalone test harness"
 $bat = Join-Path $PSScriptRoot "build_standalone.bat"

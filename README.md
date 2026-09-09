@@ -53,6 +53,7 @@ Total Commander считает `.img` **мультимедиа** (формат �
 | `ScanDepth` | `6` | Глубина обхода при `FullScan=1` |
 | `MaxNodes` | `40000` | Лимит узлов при полном скане |
 | `MaxFileList` | `1000` | Макс. файлов в списке |
+| `DebugLog` | `0` (Release) / `1` (Debug) | `1` — писать диагностику в `%TEMP%\IsoLister.log` |
 
 Пример:
 
@@ -61,6 +62,7 @@ Total Commander считает `.img` **мультимедиа** (формат �
 FullScan=0
 ShowFileList=0
 ShowBootEntries=0
+DebugLog=0
 ```
 
 ## Сборка из исходников
