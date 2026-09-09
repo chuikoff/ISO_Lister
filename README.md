@@ -96,6 +96,8 @@ EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | 
 Тёмная тема: по **`[Configuration] DarkMode`** (переключатель TC `cm_SwitchDarkMode`), **не** по теме Windows.  
 Опционально `[IsoLister] Dark=0|1|2` — light / dark / auto (по умолчанию `2` = как TC).
 
+Отчёт: единый акцентный стиль (светлая/тёмная палитра) — цветные заголовки секций, приглушённые подписи полей, ✅/❌, линии-разделители; бренд-строка `IsoLister` + версия. Следует TC DarkMode через опцию Dark.
+
 Поиск в Lister: **Ctrl+F** / F7 (ListSearchText).
 
 ```ini
@@ -215,6 +217,8 @@ UI language: if `wincmd.ini` `LanguageIni`/`LanguageDll` contains **RUS** → Ru
 
 Dark theme: follows **`[Configuration] DarkMode`** (TC `cm_SwitchDarkMode`), **not** Windows theme.  
 Optional `[IsoLister] Dark=0|1|2` — light / dark / auto (default `2` = TC).
+
+Report: unified accent colors for light/dark — section headers, muted field labels, ✅/❌, separator rules; brand line `IsoLister` + version. Follows TC DarkMode via the existing Dark option.
 
 Search in Lister: **Ctrl+F** / F7 (`ListSearchText`).
 

@@ -124,8 +124,13 @@ static int g_optDark = 2;
 // UI: русский, если LanguageIni TC содержит RUS; иначе английский
 static bool g_uiRu = false;
 static bool g_darkMode = false;
-static COLORREF g_fgColor = RGB(30, 30, 30);
-static COLORREF g_bgColor = RGB(255, 255, 255);
+static COLORREF g_fgColor = RGB(0x1E, 0x1E, 0x1E);
+static COLORREF g_bgColor = RGB(0xFF, 0xFF, 0xFF);
+static COLORREF g_accentHeader = RGB(0x2B, 0x6C, 0xB0);
+static COLORREF g_accentLabel = RGB(0x6B, 0x72, 0x80);
+static COLORREF g_accentOk = RGB(0x16, 0xA3, 0x4A);
+static COLORREF g_accentErr = RGB(0xDC, 0x26, 0x26);
+static COLORREF g_accentRule = RGB(0x9C, 0xA3, 0xAF);
 
 static const wchar_t* tr(const wchar_t* ru, const wchar_t* en) {
     return g_uiRu ? ru : en;
@@ -173,13 +178,23 @@ static void recompute_theme(const wchar_t* wincmdPath) {
         g_darkMode = detect_tc_dark_mode(wincmdPath);
 
     if (g_darkMode) {
-        // Match typical TC dark palette (not OS theme)
-        g_bgColor = RGB(32, 32, 32);
-        g_fgColor = RGB(220, 220, 220);
+        // Unified report palette (dark) — same layout/heuristics as light
+        g_bgColor = RGB(0x20, 0x20, 0x20);
+        g_fgColor = RGB(0xDC, 0xDC, 0xDC);
+        g_accentHeader = RGB(0x6C, 0xB6, 0xFF);
+        g_accentLabel = RGB(0x9C, 0xA3, 0xAF);
+        g_accentOk = RGB(0x3D, 0xD6, 0x8C);
+        g_accentErr = RGB(0xF0, 0x71, 0x78);
+        g_accentRule = RGB(0x40, 0x40, 0x40);
     }
     else {
-        g_bgColor = RGB(255, 255, 255);
-        g_fgColor = RGB(30, 30, 30);
+        g_bgColor = RGB(0xFF, 0xFF, 0xFF);
+        g_fgColor = RGB(0x1E, 0x1E, 0x1E);
+        g_accentHeader = RGB(0x2B, 0x6C, 0xB0);
+        g_accentLabel = RGB(0x6B, 0x72, 0x80);
+        g_accentOk = RGB(0x16, 0xA3, 0x4A);
+        g_accentErr = RGB(0xDC, 0x26, 0x26);
+        g_accentRule = RGB(0x9C, 0xA3, 0xAF);
         // In light mode only: prefer Lister panel colors if set
         if (wincmdPath && wincmdPath[0]) {
             int fg = GetPrivateProfileIntW(L"Lister", L"FgColor", -1, wincmdPath);
@@ -241,6 +256,11 @@ static std::wstring FromUCS2BE(const uint8_t* bytes, int lenBytes) {
     return out;
 }
 static std::wstring repeat(wchar_t ch, int n) { return std::wstring(n, ch); }
+
+static void append_report_brand(std::wostringstream& txt) {
+    txt << L"IsoLister\tv" << ISO_LISTER_VERSION_WSTR << L"\r\n";
+    txt << repeat(L'─', 42) << L"\r\n";
+}
 
 static std::wstring FormatFileSize(uint64_t bytes) {
     wchar_t buf[64];
@@ -692,6 +712,7 @@ static void append_disk_partitions(std::wostringstream& txt, FileReader& fr, con
 
 static std::wstring generate_disk_image_report(const wchar_t* FileToLoad, FileReader& fr, const DiskImageInfo& disk) {
     std::wostringstream txt;
+    append_report_brand(txt);
     (void)FileToLoad;
     txt << tr(L"Тип образа", L"Image type") << L"\t💽 " << tr(L"Образ диска (raw sector dump)", L"Disk image (raw sector dump)") << L"\r\n";
     txt << repeat(L'─', 90) << L"\r\n";
@@ -767,6 +788,7 @@ static bool probe_vhdx(FileReader& fr, VhdInfo& out) {
 
 static std::wstring generate_vhd_report(const wchar_t* FileToLoad, FileReader& fr, const VhdInfo& vhd) {
     std::wostringstream txt;
+    append_report_brand(txt);
     (void)FileToLoad;
     txt << tr(L"Тип образа", L"Image type") << L"\t💾 " << vhd.typeLabel << L"\r\n";
     txt << repeat(L'─', 90) << L"\r\n";
@@ -1074,6 +1096,7 @@ static bool probe_udif_dmg(FileReader& fr, UdIfInfo& out, const wchar_t* pathFor
 
 static std::wstring generate_udif_dmg_report(const wchar_t* FileToLoad, FileReader& fr, const UdIfInfo& dmg) {
     std::wostringstream txt;
+    append_report_brand(txt);
     (void)FileToLoad;
     (void)fr;
     txt << tr(L"Тип образа", L"Image type") << L"\t🍎 Apple Disk Image (UDIF .dmg)\r\n";
@@ -2867,6 +2890,21 @@ static std::vector<Range> find_emoji_ranges(const std::wstring& s) {
     }
     return r;
 }
+static void RichApplyRange(HWND hRE, LONG a, LONG b, COLORREF color, const wchar_t* optionalFace = nullptr) {
+    if (b <= a) return;
+    CHARRANGE cr{ a, b };
+    SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&cr);
+    CHARFORMAT2W cf{};
+    cf.cbSize = sizeof(cf);
+    cf.dwMask = CFM_COLOR;
+    cf.crTextColor = color;
+    if (optionalFace && optionalFace[0]) {
+        cf.dwMask |= CFM_FACE;
+        StringCchCopyW(cf.szFaceName, LF_FACESIZE, optionalFace);
+    }
+    SendMessageW(hRE, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
+}
+
 static void RichColorizeEmojis(HWND hRE, const std::wstring& fullText) {
     auto ranges = find_emoji_ranges(fullText);
     if (ranges.empty()) return;
@@ -2880,9 +2918,94 @@ static void RichColorizeEmojis(HWND hRE, const std::wstring& fullText) {
         StringCchCopyW(cf.szFaceName, LF_FACESIZE, L"Segoe UI Emoji");
         SendMessageW(hRE, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
     }
-    CHARRANGE crNone{ -1,-1 };
+}
+
+static bool line_is_mostly_rule(const std::wstring& fullText, size_t ls, size_t le) {
+    size_t box = 0, other = 0;
+    for (size_t i = ls; i < le; ++i) {
+        wchar_t ch = fullText[i];
+        if (ch == L'\r' || ch == L'\n' || ch == L' ' || ch == L'\t') continue;
+        if (ch == 0x2500) ++box;
+        else ++other;
+    }
+    return box > 0 && box >= other;
+}
+
+static void RichColorizeReport(HWND hRE, const std::wstring& fullText) {
+    const size_t n = fullText.size();
+    size_t i = 0;
+    while (i < n) {
+        const size_t ls = i;
+        while (i < n && fullText[i] != L'\n') ++i;
+        size_t contentEnd = i;
+        if (contentEnd > ls && fullText[contentEnd - 1] == L'\r') --contentEnd;
+
+        if (contentEnd > ls) {
+            if (line_is_mostly_rule(fullText, ls, contentEnd)) {
+                RichApplyRange(hRE, (LONG)ls, (LONG)contentEnd, g_accentRule);
+            }
+            else {
+                uint32_t cp0 = 0;
+                wchar_t ch0 = fullText[ls];
+                if (is_high(ch0) && ls + 1 < contentEnd && is_low(fullText[ls + 1]))
+                    cp0 = cp_from_pair(ch0, fullText[ls + 1]);
+                else
+                    cp0 = (uint32_t)ch0;
+
+                size_t tabPos = (size_t)-1;
+                for (size_t t = ls; t < contentEnd; ++t) {
+                    if (fullText[t] == L'\t') { tabPos = t; break; }
+                }
+
+                bool startsEmoji = is_emoji_cp(cp0) && cp0 != 0x200D && cp0 != 0xFE0F;
+                bool banner = false;
+                if (startsEmoji) {
+                    if (tabPos == (size_t)-1) {
+                        banner = true;
+                    }
+                    else {
+                        banner = true;
+                        for (size_t t = tabPos + 1; t < contentEnd; ++t) {
+                            wchar_t c = fullText[t];
+                            if (c != L' ' && c != L'\t') { banner = false; break; }
+                        }
+                    }
+                }
+
+                if (banner) {
+                    LONG end = (tabPos != (size_t)-1) ? (LONG)tabPos : (LONG)contentEnd;
+                    RichApplyRange(hRE, (LONG)ls, end, g_accentHeader);
+                }
+                else if (contentEnd - ls >= 9 && fullText.compare(ls, 9, L"IsoLister") == 0) {
+                    RichApplyRange(hRE, (LONG)ls, (LONG)(ls + 9), g_accentHeader);
+                    if (ls + 9 < contentEnd && fullText[ls + 9] == L'\t')
+                        RichApplyRange(hRE, (LONG)(ls + 10), (LONG)contentEnd, g_accentLabel);
+                }
+                else if (tabPos != (size_t)-1 && tabPos > ls) {
+                    RichApplyRange(hRE, (LONG)ls, (LONG)tabPos, g_accentLabel);
+                }
+            }
+        }
+
+        if (i < n && fullText[i] == L'\n') ++i;
+    }
+
+    // Checkmark / cross (BMP)
+    for (size_t p = 0; p < n; ++p) {
+        wchar_t ch = fullText[p];
+        if (ch == 0x2705)
+            RichApplyRange(hRE, (LONG)p, (LONG)(p + 1), g_accentOk, L"Segoe UI Emoji");
+        else if (ch == 0x274C)
+            RichApplyRange(hRE, (LONG)p, (LONG)(p + 1), g_accentErr, L"Segoe UI Emoji");
+    }
+
+    // Other emoji: face only (keeps ✅/❌ colors)
+    RichColorizeEmojis(hRE, fullText);
+
+    CHARRANGE crNone{ -1, -1 };
     SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&crNone);
 }
+
 
 // -----------------------------------------------------------------------------
 // Чтение опций из INI
@@ -3194,6 +3317,7 @@ static std::wstring wim_flags_summary(uint32_t flags) {
 
 static std::wstring generate_bare_wim_report(const wchar_t* FileToLoad, FileReader& fr) {
     std::wostringstream txt;
+    append_report_brand(txt);
     std::wstring ext = GetFileExtensionLower(FileToLoad);
 
     uint8_t hdr[208]{};
@@ -3287,6 +3411,7 @@ static std::wstring generate_bare_wim_report(const wchar_t* FileToLoad, FileRead
 static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
 {
     std::wostringstream txt;
+    append_report_brand(txt);
     ScanResult scan{};
 
     FileReader fr;
@@ -3780,7 +3905,7 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
         RichSetTextUnicode(hRE, L"Ошибка отображения отчёта в RichEdit.\r\n");
     }
 
-    RichColorizeEmojis(hRE, text);
+    RichColorizeReport(hRE, text);
     SendMessageW(hRE, EM_SETSEL, 0, 0);
     SendMessageW(hRE, EM_SCROLLCARET, 0, 0);
 
