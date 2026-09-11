@@ -3049,10 +3049,18 @@ static bool is_section_header_cp(uint32_t cp) {
     case 0x1F4DD: // 📝
     case 0x1F4BE: // 💾
     case 0x1F4BF: // 💿
+    case 0x1F4E6: // 📦 partition / blkx item
+    case 0x2139:  // ℹ️ note
         return true;
     default:
         return false;
     }
+}
+
+static bool label_starts(const std::wstring& s, const wchar_t* pfx) {
+    size_t n = 0;
+    while (pfx[n]) ++n;
+    return s.size() >= n && s.compare(0, n, pfx) == 0;
 }
 
 static bool is_section_label(const std::wstring& raw) {
@@ -3064,11 +3072,15 @@ static bool is_section_label(const std::wstring& raw) {
     return s == L"Редакции (WIM)" || s == L"WIM editions"
         || s == L"Анализ ISO" || s == L"ISO analysis"
         || s == L"Тип ФС" || s == L"FS type"
+        || s == L"Тип образа" || s == L"Image type"
         || s == L"Загрузка (El Torito)" || s == L"Boot (El Torito)"
         || s == L"Windows" || s == L"Linux" || s == L"macOS"
         || s == L"UDF (ECMA-167)" || s == L"UDIF"
         || s == L"Разметка диска" || s == L"Disk layout"
-        || s == L"Содержимое" || s == L"Contents";
+        || s == L"Разделы (blkx)" || s == L"Partitions (blkx)"
+        || s == L"Содержимое" || s == L"Contents"
+        || s == L"Примечание" || s == L"Note"
+        || label_starts(s, L"Раздел #") || label_starts(s, L"Partition #");
 }
 
 static void RichColorizeReport(HWND hRE, const std::wstring& fullText) {
