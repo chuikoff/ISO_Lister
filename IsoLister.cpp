@@ -3028,6 +3028,49 @@ static bool line_is_mostly_rule(const std::wstring& fullText, size_t ls, size_t 
     return box > 0 && box >= other;
 }
 
+static size_t skip_one_cp(const std::wstring& s, size_t i, size_t end) {
+    if (i >= end) return i;
+    if (is_high(s[i]) && i + 1 < end && is_low(s[i + 1])) return i + 2;
+    return i + 1;
+}
+
+// Section banners (🗂 🚀 🪟 …). Field icons like 🗓 (dates) are not headers.
+static bool is_section_header_cp(uint32_t cp) {
+    switch (cp) {
+    case 0x1F5C2: // 🗂
+    case 0x1F680: // 🚀
+    case 0x1FA9F: // 🪟
+    case 0x1F427: // 🐧
+    case 0x1F4C0: // 📀
+    case 0x1F34E: // 🍎
+    case 0x1F9F1: // 🧱
+    case 0x1F4C1: // 📁
+    case 0x1F4DA: // 📚
+    case 0x1F4DD: // 📝
+    case 0x1F4BE: // 💾
+    case 0x1F4BF: // 💿
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool is_section_label(const std::wstring& raw) {
+    size_t a = 0, b = raw.size();
+    while (a < b && (raw[a] == L' ' || raw[a] == L'\t')) ++a;
+    while (b > a && (raw[b - 1] == L' ' || raw[b - 1] == L'\t')) --b;
+    if (a >= b) return false;
+    std::wstring s = raw.substr(a, b - a);
+    return s == L"Редакции (WIM)" || s == L"WIM editions"
+        || s == L"Анализ ISO" || s == L"ISO analysis"
+        || s == L"Тип ФС" || s == L"FS type"
+        || s == L"Загрузка (El Torito)" || s == L"Boot (El Torito)"
+        || s == L"Windows" || s == L"Linux" || s == L"macOS"
+        || s == L"UDF (ECMA-167)" || s == L"UDIF"
+        || s == L"Разметка диска" || s == L"Disk layout"
+        || s == L"Содержимое" || s == L"Contents";
+}
+
 static void RichColorizeReport(HWND hRE, const std::wstring& fullText) {
     const size_t n = fullText.size();
     size_t i = 0;
@@ -3055,8 +3098,20 @@ static void RichColorizeReport(HWND hRE, const std::wstring& fullText) {
                     if (fullText[t] == L'\t') { tabPos = t; break; }
                 }
 
-                bool startsEmoji = is_emoji_cp(cp0) && cp0 != 0x200D && cp0 != 0xFE0F;
-                if (startsEmoji) {
+                size_t labelStart = ls;
+                bool leadingEmoji = is_emoji_cp(cp0) && cp0 != 0x200D && cp0 != 0xFE0F;
+                if (leadingEmoji) {
+                    labelStart = skip_one_cp(fullText, ls, contentEnd);
+                    while (labelStart < contentEnd && fullText[labelStart] == L' ') ++labelStart;
+                }
+                std::wstring label;
+                if (tabPos != (size_t)-1 && tabPos > labelStart)
+                    label.assign(fullText, labelStart, tabPos - labelStart);
+                else if (contentEnd > labelStart)
+                    label.assign(fullText, labelStart, contentEnd - labelStart);
+
+                bool section = is_section_header_cp(cp0) || is_section_label(label);
+                if (section) {
                     LONG end = (tabPos != (size_t)-1) ? (LONG)tabPos : (LONG)contentEnd;
                     RichApplyRange(hRE, (LONG)ls, end, g_accentHeader);
                     if (tabPos != (size_t)-1 && tabPos + 1 < contentEnd)
@@ -3655,7 +3710,7 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
     auto append_wim_editions = [&](bool withHeader) {
         if (!winInfo.detected || winInfo.editions.empty()) return;
         if (withHeader) txt << repeat(L'─', 90) << L"\r\n";
-        txt << tr(L"Редакции (WIM)", L"WIM editions") << L"\t"
+        txt << L"🪟 " << tr(L"Редакции (WIM)", L"WIM editions") << L"\t"
             << (int)winInfo.editions.size() << L" "
             << tr(L"образ(ов)", L"image(s)") << L"\r\n";
         txt << L"#\t" << tr(L"Название", L"Name") << L"\tEditionID\t" << tr(L"Версия", L"Version") << L"\r\n";
