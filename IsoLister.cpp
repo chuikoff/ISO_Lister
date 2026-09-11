@@ -169,20 +169,16 @@ static bool detect_tc_dark_mode(const wchar_t* wincmdPath) {
     return GetPrivateProfileIntW(L"Configuration", L"DarkMode", 0, wincmdPath) != 0;
 }
 
-static void recompute_theme(const wchar_t* wincmdPath) {
-    if (g_optDark == 0)
-        g_darkMode = false;
-    else if (g_optDark == 1)
-        g_darkMode = true;
-    else
-        g_darkMode = detect_tc_dark_mode(wincmdPath);
+static int color_luma(COLORREF c) {
+    return (GetRValue(c) * 299 + GetGValue(c) * 587 + GetBValue(c) * 114) / 1000;
+}
 
-    if (g_darkMode) {
-        // Unified report palette (dark) — same layout/heuristics as light
+static void apply_report_palette(bool dark) {
+    g_darkMode = dark;
+    if (dark) {
         g_bgColor = RGB(0x20, 0x20, 0x20);
         g_fgColor = RGB(0xDC, 0xDC, 0xDC);
         g_accentHeader = RGB(0x6C, 0xB6, 0xFF);
-        g_accentLabel = RGB(0x9C, 0xA3, 0xAF);
         g_accentOk = RGB(0x3D, 0xD6, 0x8C);
         g_accentErr = RGB(0xF0, 0x71, 0x78);
         g_accentRule = RGB(0x40, 0x40, 0x40);
@@ -191,20 +187,78 @@ static void recompute_theme(const wchar_t* wincmdPath) {
         g_bgColor = RGB(0xFF, 0xFF, 0xFF);
         g_fgColor = RGB(0x1E, 0x1E, 0x1E);
         g_accentHeader = RGB(0x2B, 0x6C, 0xB0);
-        g_accentLabel = RGB(0x6B, 0x72, 0x80);
         g_accentOk = RGB(0x16, 0xA3, 0x4A);
         g_accentErr = RGB(0xDC, 0x26, 0x26);
-        g_accentRule = RGB(0x9C, 0xA3, 0xAF);
-        // In light mode only: prefer Lister panel colors if set
-        if (wincmdPath && wincmdPath[0]) {
-            int fg = GetPrivateProfileIntW(L"Lister", L"FgColor", -1, wincmdPath);
-            int bg = GetPrivateProfileIntW(L"Lister", L"BgColor", -1, wincmdPath);
-            if (fg >= 0) g_fgColor = (COLORREF)fg;
-            if (bg >= 0) g_bgColor = (COLORREF)bg;
-        }
+        g_accentRule = RGB(0xD1, 0xD5, 0xDB);
     }
-    log_line(L"Theme: dark=%d DarkOpt=%d (TC DarkMode / cm_SwitchDarkMode)",
-        g_darkMode ? 1 : 0, g_optDark);
+    // Labels use the same color as values — muted gray made one line look split.
+    g_accentLabel = g_fgColor;
+}
+
+static bool sample_parent_luma(HWND parent, int& lumaOut) {
+    if (!parent || !IsWindow(parent)) return false;
+    RECT rc{};
+    GetClientRect(parent, &rc);
+    if (rc.right < 8 || rc.bottom < 8) return false;
+    HDC hdc = GetDC(parent);
+    if (!hdc) return false;
+    COLORREF c = GetPixel(hdc, 4, 4);
+    ReleaseDC(parent, hdc);
+    if (c == CLR_INVALID) return false;
+    int y = color_luma(c);
+    // Fresh/unpainted DC is often exact black — ignore it.
+    if (y <= 2 && GetRValue(c) == 0 && GetGValue(c) == 0 && GetBValue(c) == 0)
+        return false;
+    lumaOut = y;
+    return true;
+}
+
+static void recompute_theme(const wchar_t* wincmdPath, HWND parentHint = nullptr) {
+    int listerFg = -1, listerBg = -1;
+    if (wincmdPath && wincmdPath[0]) {
+        listerFg = GetPrivateProfileIntW(L"Lister", L"FgColor", -1, wincmdPath);
+        listerBg = GetPrivateProfileIntW(L"Lister", L"BgColor", -1, wincmdPath);
+    }
+
+    bool dark = false;
+    if (g_optDark == 0)
+        dark = false;
+    else if (g_optDark == 1)
+        dark = true;
+    else if (listerBg >= 0)
+        dark = color_luma((COLORREF)listerBg) < 128;
+    else
+        dark = detect_tc_dark_mode(wincmdPath);
+
+    int parentLuma = -1;
+    if (g_optDark == 2 && sample_parent_luma(parentHint, parentLuma)) {
+        if (parentLuma >= 160) dark = false;
+        else if (parentLuma <= 80 && listerBg < 0) dark = true;
+    }
+
+    apply_report_palette(dark);
+
+    if (listerFg >= 0) g_fgColor = (COLORREF)listerFg;
+    if (listerBg >= 0) g_bgColor = (COLORREF)listerBg;
+    g_accentLabel = g_fgColor;
+    if (color_luma(g_bgColor) >= 128) {
+        g_accentHeader = RGB(0x2B, 0x6C, 0xB0);
+        g_accentOk = RGB(0x16, 0xA3, 0x4A);
+        g_accentErr = RGB(0xDC, 0x26, 0x26);
+        g_accentRule = RGB(0xD1, 0xD5, 0xDB);
+        g_darkMode = false;
+    }
+    else {
+        g_accentHeader = RGB(0x6C, 0xB6, 0xFF);
+        g_accentOk = RGB(0x3D, 0xD6, 0x8C);
+        g_accentErr = RGB(0xF0, 0x71, 0x78);
+        g_accentRule = RGB(0x40, 0x40, 0x40);
+        g_darkMode = true;
+    }
+
+    log_line(L"Theme: dark=%d DarkOpt=%d listerBg=%d parentLuma=%d fg=%06X bg=%06X",
+        g_darkMode ? 1 : 0, g_optDark, listerBg, parentLuma,
+        (unsigned)(g_fgColor & 0xFFFFFF), (unsigned)(g_bgColor & 0xFFFFFF));
 }
 
 // Таб‑позиции (в "знаках", конвертируем в twips по шрифту)
@@ -2799,11 +2853,13 @@ static void sanitize_wstring_for_richedit(std::wstring& s) {
 static void RichSetDefaultCharFormat(HWND hRE) {
     CHARFORMAT2W cf{};
     cf.cbSize = sizeof(cf);
-    cf.dwMask = CFM_FACE | CFM_COLOR | CFM_SIZE;
+    cf.dwMask = CFM_FACE | CFM_COLOR | CFM_SIZE | CFM_EFFECTS;
+    cf.dwEffects = 0; // clear CFE_AUTOCOLOR so light OS theme cannot paint black-on-dark
     cf.crTextColor = g_fgColor;
     cf.yHeight = 240;
     StringCchCopyW(cf.szFaceName, LF_FACESIZE, L"Consolas");
     SendMessageW(hRE, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
+    SendMessageW(hRE, EM_SETCHARFORMAT, SCF_DEFAULT, (LPARAM)&cf);
     SendMessageW(hRE, EM_SETBKGNDCOLOR, 0, (LPARAM)g_bgColor);
 }
 
@@ -2911,6 +2967,12 @@ static void RichColorizeEmojis(HWND hRE, const std::wstring& fullText) {
 
     for (const auto& rg : ranges) {
         if (rg.b <= rg.a || rg.a < 0 || rg.b > (LONG)fullText.size()) continue;
+        bool skip = false;
+        for (LONG p = rg.a; p < rg.b; ++p) {
+            wchar_t ch = fullText[(size_t)p];
+            if (ch == 0x2705 || ch == 0x274C) { skip = true; break; }
+        }
+        if (skip) continue;
         CHARRANGE cr{ rg.a, rg.b };
         SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&cr);
         CHARFORMAT2W cf{}; cf.cbSize = sizeof(cf);
@@ -2961,14 +3023,21 @@ static void RichColorizeReport(HWND hRE, const std::wstring& fullText) {
                 if (startsEmoji) {
                     LONG end = (tabPos != (size_t)-1) ? (LONG)tabPos : (LONG)contentEnd;
                     RichApplyRange(hRE, (LONG)ls, end, g_accentHeader);
+                    if (tabPos != (size_t)-1 && tabPos + 1 < contentEnd)
+                        RichApplyRange(hRE, (LONG)(tabPos + 1), (LONG)contentEnd, g_fgColor);
                 }
                 else if (contentEnd - ls >= 9 && fullText.compare(ls, 9, L"IsoLister") == 0) {
                     RichApplyRange(hRE, (LONG)ls, (LONG)(ls + 9), g_accentHeader);
                     if (ls + 9 < contentEnd && fullText[ls + 9] == L'\t')
-                        RichApplyRange(hRE, (LONG)(ls + 10), (LONG)contentEnd, g_accentLabel);
+                        RichApplyRange(hRE, (LONG)(ls + 10), (LONG)contentEnd, g_fgColor);
                 }
                 else if (tabPos != (size_t)-1 && tabPos > ls) {
                     RichApplyRange(hRE, (LONG)ls, (LONG)tabPos, g_accentLabel);
+                    if (tabPos + 1 < contentEnd)
+                        RichApplyRange(hRE, (LONG)(tabPos + 1), (LONG)contentEnd, g_fgColor);
+                }
+                else {
+                    RichApplyRange(hRE, (LONG)ls, (LONG)contentEnd, g_fgColor);
                 }
             }
         }
@@ -3841,7 +3910,7 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
     {
         wchar_t wincmd[MAX_PATH]{};
         resolve_wincmd_ini(wincmd, MAX_PATH);
-        recompute_theme(wincmd[0] ? wincmd : nullptr);
+        recompute_theme(wincmd[0] ? wincmd : nullptr, ParentWin);
     }
 
     bool quickView = (ShowFlags & lcp_fittowindow) != 0;
@@ -3872,7 +3941,6 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
     SubclassRichEdit(hRE);
 
     if (g_hMonoFont) SendMessageW(hRE, WM_SETFONT, (WPARAM)g_hMonoFont, TRUE);
-    RichSetDefaultCharFormat(hRE);
 
     if (wrapText)
         SendMessageW(hRE, EM_SETTARGETDEVICE, 0, 0);
@@ -3890,6 +3958,9 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
         log_line(L"ListLoadW: RichSetTextUnicode failed, len=%u", (unsigned)text.size());
         RichSetTextUnicode(hRE, L"Ошибка отображения отчёта в RichEdit.\r\n");
     }
+    // After SETTEXTEX: force Consolas + fg (SETTEXT would otherwise keep AUTOCOLOR
+    // from the light OS theme, so later lines looked dimmer than the first ones).
+    RichSetDefaultCharFormat(hRE);
 
     RichColorizeReport(hRE, text);
     SendMessageW(hRE, EM_SETSEL, 0, 0);
