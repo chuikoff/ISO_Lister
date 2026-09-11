@@ -259,7 +259,7 @@ static std::wstring repeat(wchar_t ch, int n) { return std::wstring(n, ch); }
 
 static void append_report_brand(std::wostringstream& txt) {
     txt << L"IsoLister\tv" << ISO_LISTER_VERSION_WSTR << L"\r\n";
-    txt << repeat(L'─', 42) << L"\r\n";
+    txt << repeat(L'─', 90) << L"\r\n";
 }
 
 static std::wstring FormatFileSize(uint64_t bytes) {
@@ -2958,21 +2958,7 @@ static void RichColorizeReport(HWND hRE, const std::wstring& fullText) {
                 }
 
                 bool startsEmoji = is_emoji_cp(cp0) && cp0 != 0x200D && cp0 != 0xFE0F;
-                bool banner = false;
                 if (startsEmoji) {
-                    if (tabPos == (size_t)-1) {
-                        banner = true;
-                    }
-                    else {
-                        banner = true;
-                        for (size_t t = tabPos + 1; t < contentEnd; ++t) {
-                            wchar_t c = fullText[t];
-                            if (c != L' ' && c != L'\t') { banner = false; break; }
-                        }
-                    }
-                }
-
-                if (banner) {
                     LONG end = (tabPos != (size_t)-1) ? (LONG)tabPos : (LONG)contentEnd;
                     RichApplyRange(hRE, (LONG)ls, end, g_accentHeader);
                 }
