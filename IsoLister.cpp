@@ -2877,40 +2877,6 @@ static bool RichSetTextUnicode(HWND hRE, const std::wstring& text) {
     return GetWindowTextLengthW(hRE) > 0;
 }
 
-#ifndef GTL_DEFAULT
-#define GTL_DEFAULT 0
-#endif
-#ifndef GTL_NUMCHARS
-#define GTL_NUMCHARS 8
-#endif
-#ifndef GT_DEFAULT
-#define GT_DEFAULT 0
-#endif
-
-// RichEdit stores paragraph marks as CR, not CRLF. Colorize MUST use this
-// text: indices into our `\r\n` source drift by one per line and paint the
-// tail of the report (Windows block, 2nd WIM row) with the rule-gray color.
-static std::wstring RichGetWindowText(HWND hRE) {
-    GETTEXTLENGTHEX gtl{};
-    gtl.flags = GTL_DEFAULT | GTL_NUMCHARS;
-    gtl.codepage = 1200;
-    LRESULT n = SendMessageW(hRE, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
-    if (n <= 0) return {};
-    std::wstring s((size_t)n + 2, L'\0');
-    GETTEXTEX gt{};
-    gt.cb = (DWORD)(s.size() * sizeof(wchar_t));
-    gt.flags = GT_DEFAULT;
-    gt.codepage = 1200;
-    LRESULT got = SendMessageW(hRE, EM_GETTEXTEX, (WPARAM)&gt, (LPARAM)&s[0]);
-    if (got < 0) return {};
-    if ((size_t)got < s.size())
-        s.resize((size_t)got);
-    else {
-        while (!s.empty() && s.back() == L'\0') s.pop_back();
-    }
-    return s;
-}
-
 static void RichSetTabs(HWND hRE, const std::vector<int>& tabsChars) {
     // Перевод «знаки» → twips по текущему шрифту RichEdit
     HFONT hFont = (HFONT)SendMessage(hRE, WM_GETFONT, 0, 0);
@@ -2990,31 +2956,26 @@ static void RichApplyRange(HWND hRE, LONG a, LONG b, COLORREF color, const wchar
     cf.dwEffects = 0;
     cf.crTextColor = color;
     if (optionalFace && optionalFace[0]) {
-        cf.dwMask |= CFM_FACE;
+        // Face without CHARSET/SIZE often renders U+2705 as □ in RichEdit.
+        cf.dwMask |= CFM_FACE | CFM_SIZE | CFM_CHARSET;
+        cf.bCharSet = DEFAULT_CHARSET;
+        cf.yHeight = 240;
         StringCchCopyW(cf.szFaceName, LF_FACESIZE, optionalFace);
     }
     SendMessageW(hRE, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 }
 
-static void RichColorizeEmojis(HWND hRE, const std::wstring& fullText) {
-    auto ranges = find_emoji_ranges(fullText);
-    if (ranges.empty()) return;
-
-    for (const auto& rg : ranges) {
-        if (rg.b <= rg.a || rg.a < 0 || rg.b > (LONG)fullText.size()) continue;
-        bool skip = false;
-        for (LONG p = rg.a; p < rg.b; ++p) {
-            wchar_t ch = fullText[(size_t)p];
-            if (ch == 0x2705 || ch == 0x274C) { skip = true; break; }
-        }
-        if (skip) continue;
-        CHARRANGE cr{ rg.a, rg.b };
-        SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&cr);
-        CHARFORMAT2W cf{}; cf.cbSize = sizeof(cf);
-        cf.dwMask = CFM_FACE;
-        StringCchCopyW(cf.szFaceName, LF_FACESIZE, L"Segoe UI Emoji");
-        SendMessageW(hRE, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
-    }
+static void RichApplyEmojiFace(HWND hRE, LONG a, LONG b) {
+    if (b <= a) return;
+    CHARRANGE cr{ a, b };
+    SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&cr);
+    CHARFORMAT2W cf{};
+    cf.cbSize = sizeof(cf);
+    cf.dwMask = CFM_FACE | CFM_SIZE | CFM_CHARSET;
+    cf.bCharSet = DEFAULT_CHARSET;
+    cf.yHeight = 240;
+    StringCchCopyW(cf.szFaceName, LF_FACESIZE, L"Segoe UI Emoji");
+    SendMessageW(hRE, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
 }
 
 static bool line_is_mostly_rule(const std::wstring& fullText, size_t ls, size_t le) {
@@ -3083,80 +3044,93 @@ static bool is_section_label(const std::wstring& raw) {
         || label_starts(s, L"Раздел #") || label_starts(s, L"Partition #");
 }
 
-static void RichColorizeReport(HWND hRE, const std::wstring& fullText) {
-    const size_t n = fullText.size();
-    size_t i = 0;
-    while (i < n) {
-        const size_t ls = i;
-        while (i < n && fullText[i] != L'\n' && fullText[i] != L'\r') ++i;
-        const size_t contentEnd = i;
-        if (i < n && fullText[i] == L'\r') ++i;
-        if (i < n && fullText[i] == L'\n') ++i;
+static void RichColorizeReport(HWND hRE) {
+    const int nlines = (int)SendMessageW(hRE, EM_GETLINECOUNT, 0, 0);
+    for (int li = 0; li < nlines; ++li) {
+        const LONG cpLine = (LONG)SendMessageW(hRE, EM_LINEINDEX, (WPARAM)li, 0);
+        if (cpLine < 0) continue;
+        wchar_t buf[8192];
+        *(WORD*)buf = 8191;
+        int n = (int)SendMessageW(hRE, EM_GETLINE, (WPARAM)li, (LPARAM)buf);
+        if (n <= 0) continue;
+        if (n > 8191) n = 8191;
+        const std::wstring line(buf, (size_t)n);
+        const size_t len = line.size();
 
-        if (contentEnd > ls) {
-            if (line_is_mostly_rule(fullText, ls, contentEnd)) {
-                RichApplyRange(hRE, (LONG)ls, (LONG)contentEnd, g_accentRule);
+        auto apply = [&](size_t a, size_t b, COLORREF c, const wchar_t* face = nullptr) {
+            if (b > a && b <= len)
+                RichApplyRange(hRE, cpLine + (LONG)a, cpLine + (LONG)b, c, face);
+        };
+
+        if (line_is_mostly_rule(line, 0, len)) {
+            apply(0, len, g_accentRule);
+        }
+        else {
+            uint32_t cp0 = 0;
+            wchar_t ch0 = line[0];
+            if (is_high(ch0) && 1 < len && is_low(line[1]))
+                cp0 = cp_from_pair(ch0, line[1]);
+            else
+                cp0 = (uint32_t)ch0;
+
+            size_t tabPos = (size_t)-1;
+            for (size_t t = 0; t < len; ++t) {
+                if (line[t] == L'\t') { tabPos = t; break; }
+            }
+
+            size_t labelStart = 0;
+            if (is_emoji_cp(cp0) && cp0 != 0x200D && cp0 != 0xFE0F) {
+                labelStart = skip_one_cp(line, 0, len);
+                while (labelStart < len && line[labelStart] == L' ') ++labelStart;
+            }
+            std::wstring label;
+            if (tabPos != (size_t)-1 && tabPos > labelStart)
+                label.assign(line, labelStart, tabPos - labelStart);
+            else if (len > labelStart)
+                label.assign(line, labelStart, len - labelStart);
+
+            bool section = is_section_header_cp(cp0) || is_section_label(label);
+            if (section) {
+                size_t end = (tabPos != (size_t)-1) ? tabPos : len;
+                apply(0, end, g_accentHeader);
+                if (tabPos != (size_t)-1 && tabPos + 1 < len)
+                    apply(tabPos + 1, len, g_fgColor);
+            }
+            else if (len >= 9 && line.compare(0, 9, L"IsoLister") == 0) {
+                apply(0, 9, g_accentHeader);
+                if (9 < len && line[9] == L'\t')
+                    apply(10, len, g_fgColor);
+            }
+            else if (tabPos != (size_t)-1 && tabPos > 0) {
+                apply(0, tabPos, g_accentLabel);
+                if (tabPos + 1 < len)
+                    apply(tabPos + 1, len, g_fgColor);
             }
             else {
-                uint32_t cp0 = 0;
-                wchar_t ch0 = fullText[ls];
-                if (is_high(ch0) && ls + 1 < contentEnd && is_low(fullText[ls + 1]))
-                    cp0 = cp_from_pair(ch0, fullText[ls + 1]);
-                else
-                    cp0 = (uint32_t)ch0;
-
-                size_t tabPos = (size_t)-1;
-                for (size_t t = ls; t < contentEnd; ++t) {
-                    if (fullText[t] == L'\t') { tabPos = t; break; }
-                }
-
-                size_t labelStart = ls;
-                bool leadingEmoji = is_emoji_cp(cp0) && cp0 != 0x200D && cp0 != 0xFE0F;
-                if (leadingEmoji) {
-                    labelStart = skip_one_cp(fullText, ls, contentEnd);
-                    while (labelStart < contentEnd && fullText[labelStart] == L' ') ++labelStart;
-                }
-                std::wstring label;
-                if (tabPos != (size_t)-1 && tabPos > labelStart)
-                    label.assign(fullText, labelStart, tabPos - labelStart);
-                else if (contentEnd > labelStart)
-                    label.assign(fullText, labelStart, contentEnd - labelStart);
-
-                bool section = is_section_header_cp(cp0) || is_section_label(label);
-                if (section) {
-                    LONG end = (tabPos != (size_t)-1) ? (LONG)tabPos : (LONG)contentEnd;
-                    RichApplyRange(hRE, (LONG)ls, end, g_accentHeader);
-                    if (tabPos != (size_t)-1 && tabPos + 1 < contentEnd)
-                        RichApplyRange(hRE, (LONG)(tabPos + 1), (LONG)contentEnd, g_fgColor);
-                }
-                else if (contentEnd - ls >= 9 && fullText.compare(ls, 9, L"IsoLister") == 0) {
-                    RichApplyRange(hRE, (LONG)ls, (LONG)(ls + 9), g_accentHeader);
-                    if (ls + 9 < contentEnd && fullText[ls + 9] == L'\t')
-                        RichApplyRange(hRE, (LONG)(ls + 10), (LONG)contentEnd, g_fgColor);
-                }
-                else if (tabPos != (size_t)-1 && tabPos > ls) {
-                    RichApplyRange(hRE, (LONG)ls, (LONG)tabPos, g_accentLabel);
-                    if (tabPos + 1 < contentEnd)
-                        RichApplyRange(hRE, (LONG)(tabPos + 1), (LONG)contentEnd, g_fgColor);
-                }
-                else {
-                    RichApplyRange(hRE, (LONG)ls, (LONG)contentEnd, g_fgColor);
-                }
+                apply(0, len, g_fgColor);
             }
         }
-    }
 
-    // Checkmark / cross (BMP)
-    for (size_t p = 0; p < n; ++p) {
-        wchar_t ch = fullText[p];
-        if (ch == 0x2705)
-            RichApplyRange(hRE, (LONG)p, (LONG)(p + 1), g_accentOk, L"Segoe UI Emoji");
-        else if (ch == 0x274C)
-            RichApplyRange(hRE, (LONG)p, (LONG)(p + 1), g_accentErr, L"Segoe UI Emoji");
-    }
+        for (size_t p = 0; p < len; ++p) {
+            wchar_t ch = line[p];
+            if (ch != 0x2705 && ch != 0x274C) continue;
+            size_t e = p + 1;
+            if (e < len && line[e] == 0xFE0F) ++e;
+            apply(p, e, ch == 0x2705 ? g_accentOk : g_accentErr, L"Segoe UI Emoji");
+            p = e - 1;
+        }
 
-    // Other emoji: face only (keeps ✅/❌ colors)
-    RichColorizeEmojis(hRE, fullText);
+        for (const auto& rg : find_emoji_ranges(line)) {
+            if (rg.b <= rg.a) continue;
+            bool skip = false;
+            for (LONG p = rg.a; p < rg.b; ++p) {
+                wchar_t ch = line[(size_t)p];
+                if (ch == 0x2705 || ch == 0x274C) { skip = true; break; }
+            }
+            if (!skip)
+                RichApplyEmojiFace(hRE, cpLine + rg.a, cpLine + rg.b);
+        }
+    }
 
     CHARRANGE crNone{ -1, -1 };
     SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&crNone);
@@ -4063,8 +4037,7 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
     // from the light OS theme, so later lines looked dimmer than the first ones).
     RichSetDefaultCharFormat(hRE);
 
-    std::wstring stored = RichGetWindowText(hRE);
-    RichColorizeReport(hRE, stored.empty() ? text : stored);
+    RichColorizeReport(hRE);
     SendMessageW(hRE, EM_SETSEL, 0, 0);
     SendMessageW(hRE, EM_SCROLLCARET, 0, 0);
 
