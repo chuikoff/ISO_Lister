@@ -40,7 +40,7 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 
 ### Установка
 
-1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.9.zip`.
+1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.10.zip`.
 2. Откройте архив в Total Commander — появится диалог автоустановки (`pluginst.inf`).
 3. Путь по умолчанию: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Полностью перезапустите Total Commander.**
@@ -96,7 +96,7 @@ EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | 
 Тёмная тема: по **`[Configuration] DarkMode`** (переключатель TC `cm_SwitchDarkMode`), **не** по теме Windows.  
 Опционально `[IsoLister] Dark=0|1|2` — light / dark / auto (по умолчанию `2` = как TC).
 
-Отчёт: единый акцентный стиль (светлая/тёмная палитра) — цветные заголовки секций, приглушённые подписи полей, ✅/❌, линии-разделители; бренд-строка `IsoLister` + версия. Следует TC DarkMode через опцию Dark.
+Отчёт: единый акцентный стиль (светлая/тёмная палитра) — цветные заголовки секций, ✅/❌, линии-разделители; бренд-строка `IsoLister` + версия. Тема по фону Lister / DarkMode.
 
 Поиск в Lister: **Ctrl+F** / F7 (ListSearchText).
 
@@ -162,7 +162,7 @@ MIT — см. [LICENSE](LICENSE).
 
 ### Installation
 
-1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.9.zip`.
+1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.10.zip`.
 2. Open the ZIP in Total Commander — auto-install dialog appears (`pluginst.inf`).
 3. Default path: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Restart Total Commander completely.**
@@ -218,7 +218,7 @@ UI language: if `wincmd.ini` `LanguageIni`/`LanguageDll` contains **RUS** → Ru
 Dark theme: follows **`[Configuration] DarkMode`** (TC `cm_SwitchDarkMode`), **not** Windows theme.  
 Optional `[IsoLister] Dark=0|1|2` — light / dark / auto (default `2` = TC).
 
-Report: unified accent colors for light/dark — section headers, muted field labels, ✅/❌, separator rules; brand line `IsoLister` + version. Follows TC DarkMode via the existing Dark option.
+Report: unified accent colors for light/dark — section headers, ✅/❌, separator rules; brand line `IsoLister` + version. Theme follows Lister background / DarkMode.
 
 Search in Lister: **Ctrl+F** / F7 (`ListSearchText`).
 
