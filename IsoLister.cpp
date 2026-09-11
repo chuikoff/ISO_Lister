@@ -2877,6 +2877,40 @@ static bool RichSetTextUnicode(HWND hRE, const std::wstring& text) {
     return GetWindowTextLengthW(hRE) > 0;
 }
 
+#ifndef GTL_DEFAULT
+#define GTL_DEFAULT 0
+#endif
+#ifndef GTL_NUMCHARS
+#define GTL_NUMCHARS 8
+#endif
+#ifndef GT_DEFAULT
+#define GT_DEFAULT 0
+#endif
+
+// RichEdit stores paragraph marks as CR, not CRLF. Colorize MUST use this
+// text: indices into our `\r\n` source drift by one per line and paint the
+// tail of the report (Windows block, 2nd WIM row) with the rule-gray color.
+static std::wstring RichGetWindowText(HWND hRE) {
+    GETTEXTLENGTHEX gtl{};
+    gtl.flags = GTL_DEFAULT | GTL_NUMCHARS;
+    gtl.codepage = 1200;
+    LRESULT n = SendMessageW(hRE, EM_GETTEXTLENGTHEX, (WPARAM)&gtl, 0);
+    if (n <= 0) return {};
+    std::wstring s((size_t)n + 2, L'\0');
+    GETTEXTEX gt{};
+    gt.cb = (DWORD)(s.size() * sizeof(wchar_t));
+    gt.flags = GT_DEFAULT;
+    gt.codepage = 1200;
+    LRESULT got = SendMessageW(hRE, EM_GETTEXTEX, (WPARAM)&gt, (LPARAM)&s[0]);
+    if (got < 0) return {};
+    if ((size_t)got < s.size())
+        s.resize((size_t)got);
+    else {
+        while (!s.empty() && s.back() == L'\0') s.pop_back();
+    }
+    return s;
+}
+
 static void RichSetTabs(HWND hRE, const std::vector<int>& tabsChars) {
     // Перевод «знаки» → twips по текущему шрифту RichEdit
     HFONT hFont = (HFONT)SendMessage(hRE, WM_GETFONT, 0, 0);
@@ -2952,7 +2986,8 @@ static void RichApplyRange(HWND hRE, LONG a, LONG b, COLORREF color, const wchar
     SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&cr);
     CHARFORMAT2W cf{};
     cf.cbSize = sizeof(cf);
-    cf.dwMask = CFM_COLOR;
+    cf.dwMask = CFM_COLOR | CFM_EFFECTS;
+    cf.dwEffects = 0;
     cf.crTextColor = color;
     if (optionalFace && optionalFace[0]) {
         cf.dwMask |= CFM_FACE;
@@ -2998,9 +3033,10 @@ static void RichColorizeReport(HWND hRE, const std::wstring& fullText) {
     size_t i = 0;
     while (i < n) {
         const size_t ls = i;
-        while (i < n && fullText[i] != L'\n') ++i;
-        size_t contentEnd = i;
-        if (contentEnd > ls && fullText[contentEnd - 1] == L'\r') --contentEnd;
+        while (i < n && fullText[i] != L'\n' && fullText[i] != L'\r') ++i;
+        const size_t contentEnd = i;
+        if (i < n && fullText[i] == L'\r') ++i;
+        if (i < n && fullText[i] == L'\n') ++i;
 
         if (contentEnd > ls) {
             if (line_is_mostly_rule(fullText, ls, contentEnd)) {
@@ -3041,8 +3077,6 @@ static void RichColorizeReport(HWND hRE, const std::wstring& fullText) {
                 }
             }
         }
-
-        if (i < n && fullText[i] == L'\n') ++i;
     }
 
     // Checkmark / cross (BMP)
@@ -3962,7 +3996,8 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
     // from the light OS theme, so later lines looked dimmer than the first ones).
     RichSetDefaultCharFormat(hRE);
 
-    RichColorizeReport(hRE, text);
+    std::wstring stored = RichGetWindowText(hRE);
+    RichColorizeReport(hRE, stored.empty() ? text : stored);
     SendMessageW(hRE, EM_SETSEL, 0, 0);
     SendMessageW(hRE, EM_SCROLLCARET, 0, 0);
 
