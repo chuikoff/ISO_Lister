@@ -58,34 +58,6 @@ extern "C" {
 #pragma comment(linker, "/EXPORT:ListSearchTextW")
 
 // -----------------------------------------------------------------------------
-// Логирование (в %TEMP%\IsoLister.log)
-// -----------------------------------------------------------------------------
-#define ISO_DEBUG_LOG 1
-#if ISO_DEBUG_LOG
-static void log_line(const wchar_t* fmt, ...) {
-    wchar_t path[MAX_PATH]; GetTempPathW(MAX_PATH, path);
-    StringCchCatW(path, MAX_PATH, L"IsoLister.log");
-    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
-        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (h == INVALID_HANDLE_VALUE) return;
-    wchar_t buf[4096];
-    va_list ap; va_start(ap, fmt);
-    StringCchVPrintfW(buf, 4096, fmt, ap);
-    va_end(ap);
-    DWORD cb;
-    LARGE_INTEGER zero = {}, cur = {};
-    SetFilePointerEx(h, zero, &cur, FILE_END);
-    if (cur.QuadPart == 0) { const WORD bom = 0xFEFF; DWORD wcb = 2; WriteFile(h, &bom, 2, &wcb, nullptr); }
-    WriteFile(h, buf, (DWORD)(lstrlenW(buf) * sizeof(wchar_t)), &cb, nullptr);
-    const wchar_t* nl = L"\r\n";
-    WriteFile(h, nl, (DWORD)(lstrlenW(nl) * sizeof(wchar_t)), &cb, nullptr);
-    CloseHandle(h);
-}
-#else
-#define log_line(...) do{}while(0)
-#endif
-
-// -----------------------------------------------------------------------------
 // Глобальные настройки/состояние
 // -----------------------------------------------------------------------------
 static HINSTANCE g_hInst = nullptr;
@@ -120,6 +92,37 @@ static int g_optFullScan = 0;
 static int g_optVerbose = 0; // 0 = краткий отчёт (без PVD/Path Table и т.п.)
 // Dark: 0=force light, 1=force dark, 2=auto → TC [Configuration] DarkMode (cm_SwitchDarkMode)
 static int g_optDark = 2;
+static int g_optDebugLog =
+#ifdef _DEBUG
+    1
+#else
+    0
+#endif
+;
+
+// -----------------------------------------------------------------------------
+// Логирование (в %TEMP%\IsoLister.log)
+// -----------------------------------------------------------------------------
+static void log_line(const wchar_t* fmt, ...) {
+    if (!g_optDebugLog) return;
+    wchar_t path[MAX_PATH]; GetTempPathW(MAX_PATH, path);
+    StringCchCatW(path, MAX_PATH, L"IsoLister.log");
+    HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return;
+    wchar_t buf[4096];
+    va_list ap; va_start(ap, fmt);
+    StringCchVPrintfW(buf, 4096, fmt, ap);
+    va_end(ap);
+    DWORD cb;
+    LARGE_INTEGER zero = {}, cur = {};
+    SetFilePointerEx(h, zero, &cur, FILE_END);
+    if (cur.QuadPart == 0) { const WORD bom = 0xFEFF; DWORD wcb = 2; WriteFile(h, &bom, 2, &wcb, nullptr); }
+    WriteFile(h, buf, (DWORD)(lstrlenW(buf) * sizeof(wchar_t)), &cb, nullptr);
+    const wchar_t* nl = L"\r\n";
+    WriteFile(h, nl, (DWORD)(lstrlenW(nl) * sizeof(wchar_t)), &cb, nullptr);
+    CloseHandle(h);
+}
 
 // UI: русский, если LanguageIni TC содержит RUS; иначе английский
 static bool g_uiRu = false;
@@ -3150,6 +3153,7 @@ static void load_options_from_ini_file(const wchar_t* iniPath) {
     int fullScan = GetPrivateProfileIntW(L"IsoLister", L"FullScan", g_optFullScan, iniPath);
     int verbose = GetPrivateProfileIntW(L"IsoLister", L"Verbose", g_optVerbose, iniPath);
     int dark = GetPrivateProfileIntW(L"IsoLister", L"Dark", g_optDark, iniPath);
+    int dbg = GetPrivateProfileIntW(L"IsoLister", L"DebugLog", g_optDebugLog, iniPath);
     g_optDepth = (depth > 0 && depth <= 32) ? depth : g_optDepth;
     g_optMaxNodes = (maxN >= 1000 && maxN <= 1000000) ? maxN : g_optMaxNodes;
     g_optShowBootEntries = (showB != 0) ? 1 : 0;
@@ -3158,6 +3162,7 @@ static void load_options_from_ini_file(const wchar_t* iniPath) {
     g_optFullScan = (fullScan != 0) ? 1 : 0;
     g_optVerbose = (verbose != 0) ? 1 : 0;
     if (dark >= 0 && dark <= 2) g_optDark = dark;
+    g_optDebugLog = (dbg != 0) ? 1 : 0;
 }
 
 static void resolve_wincmd_ini(wchar_t* out, size_t cch) {
@@ -3196,9 +3201,9 @@ static void load_options_from_ini() {
     // Theme follows TC DarkMode (cm_SwitchDarkMode), not OS AppsUseLightTheme
     recompute_theme(wincmd[0] ? wincmd : (g_iniPath.empty() ? nullptr : g_iniPath.c_str()));
 
-    log_line(L"Options: ScanDepth=%d MaxNodes=%d ShowBootEntries=%d ShowFileList=%d MaxFileList=%d FullScan=%d Verbose=%d Dark=%d uiRu=%d darkMode=%d",
+    log_line(L"Options: ScanDepth=%d MaxNodes=%d ShowBootEntries=%d ShowFileList=%d MaxFileList=%d FullScan=%d Verbose=%d Dark=%d DebugLog=%d uiRu=%d darkMode=%d",
         g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList,
-        g_optFullScan, g_optVerbose, g_optDark, g_uiRu ? 1 : 0, g_darkMode ? 1 : 0);
+        g_optFullScan, g_optVerbose, g_optDark, g_optDebugLog, g_uiRu ? 1 : 0, g_darkMode ? 1 : 0);
 }
 
 // -----------------------------------------------------------------------------

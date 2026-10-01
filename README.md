@@ -75,7 +75,7 @@ EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | 
 Если `.img` не открывается:
 1. Перезапустите TC, в настройках плагина нажмите **«По умолчанию»**.
 2. У **Imagine** / **IrfanView** замените голый `MULTIMEDIA` на список расширений **без** `IMG`.
-3. Проверьте лог: `%TEMP%\IsoLister.log` — должна быть строка `ListLoadW: file=...img`.
+3. Включите `DebugLog=1` и проверьте `%TEMP%\IsoLister.log` — должна быть строка `ListLoadW: file=...img`.
 
 ### Настройки
 
@@ -90,6 +90,7 @@ EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | 
 | `ScanDepth` | `6` | Глубина каталогов при `FullScan=1` |
 | `MaxNodes` | `40000` | Лимит узлов при полном скане |
 | `MaxFileList` | `1000` | Макс. файлов в списке |
+| `DebugLog` | `0` (Release) / `1` (Debug) | `1` — писать диагностику в `%TEMP%\IsoLister.log` |
 
 Язык UI: если в `wincmd.ini` `LanguageIni`/`LanguageDll` содержит **RUS** — русский отчёт; иначе **английский**.
 
@@ -107,6 +108,7 @@ Verbose=0
 Dark=2
 ShowFileList=0
 ShowBootEntries=0
+DebugLog=0
 ```
 
 ### Сборка из исходников
@@ -197,7 +199,7 @@ Signatures: MBR `55 AA`, ISO9660 `CD001`, or size > 50 MB. Bare `EXT="IMG"` is n
 If `.img` does not open:
 1. Restart TC; in plugin settings click **Default** to reload detect from DLL.
 2. Narrow **Imagine** / **IrfanView** detect to image extensions **excluding** `IMG`.
-3. Check log: `%TEMP%\IsoLister.log` — look for `ListLoadW: file=...img`.
+3. Set `DebugLog=1` and check `%TEMP%\IsoLister.log` — look for `ListLoadW: file=...img`.
 
 ### Settings
 
@@ -212,6 +214,7 @@ Section `[IsoLister]` in `%APPDATA%\GHISLER\lsplugin.ini` (or `wincmd.ini`):
 | `ScanDepth` | `6` | Directory depth when `FullScan=1` |
 | `MaxNodes` | `40000` | Node limit for full scan |
 | `MaxFileList` | `1000` | Max files in list |
+| `DebugLog` | `0` (Release) / `1` (Debug) | `1` — write diagnostics to `%TEMP%\IsoLister.log` |
 
 UI language: if `wincmd.ini` `LanguageIni`/`LanguageDll` contains **RUS** → Russian report; otherwise **English**.
 
@@ -229,6 +232,7 @@ Verbose=0
 Dark=2
 ShowFileList=0
 ShowBootEntries=0
+DebugLog=0
 ```
 
 ### Build from source
