@@ -1536,6 +1536,7 @@ struct WindowsInfo {
     std::wstring imageType;
     std::wstring productVersion;
     std::wstring buildNumber;
+    std::wstring displayVersion; // 25H2, 22H2, 2004, …
     std::wstring channel;
     std::wstring architecture;
     std::wstring defaultLanguage;
@@ -1796,6 +1797,148 @@ static std::wstring guess_windows_product_name(const std::vector<WimImageInfo>& 
         if (n.find(L"windows pe") != std::wstring::npos) return L"Windows PE";
     }
     return L"";
+}
+
+static bool is_ascii_alnum(wchar_t ch) {
+    return (ch >= L'0' && ch <= L'9')
+        || (ch >= L'A' && ch <= L'Z')
+        || (ch >= L'a' && ch <= L'z');
+}
+
+// "10.0.26200" / "10.0.26200.1742" → 26200. A bare build ("26200") is accepted too.
+static int parse_nt_build(const std::wstring& version) {
+    int parts[4] = {};
+    int n = 0;
+    int cur = 0;
+    bool in = false;
+    for (wchar_t ch : version) {
+        if (ch >= L'0' && ch <= L'9') {
+            in = true;
+            if (cur > 1000000) return 0;
+            cur = cur * 10 + (ch - L'0');
+        }
+        else if (ch == L'.') {
+            if (!in || n >= 3) return 0;
+            parts[n++] = cur;
+            cur = 0;
+            in = false;
+        }
+        else if (ch == L' ' || ch == L'\t') {
+            continue;
+        }
+        else {
+            break;
+        }
+    }
+    if (in && n < 4) parts[n++] = cur;
+    if (n >= 3 && parts[2] > 0) return parts[2];
+    if (n == 1 && parts[0] >= 10240) return parts[0];
+    return 0;
+}
+
+static bool windows_product_is_server(const std::wstring& product, const std::vector<WimImageInfo>& editions) {
+    if (ToLower(product).find(L"server") != std::wstring::npos) return true;
+    for (const auto& e : editions) {
+        std::wstring d = ToLower(e.displayName + L" " + e.name + L" " + e.editionId + L" " + e.description);
+        if (d.find(L"server") != std::wstring::npos) return true;
+    }
+    return false;
+}
+
+// Marketing name (DisplayVersion): 22H2, 25H2, or the older YYMM label (1909, 2004).
+// Client and Server share some builds (26100 is Windows 11 24H2 and Server 2025).
+// kind: 0 = both, 1 = client only, 2 = server only.
+static const wchar_t* windows_marketing_version(int build, bool server) {
+    if (build <= 0) return nullptr;
+    struct Exact { int build; const wchar_t* label; int kind; };
+    static const Exact kExact[] = {
+        {10240, L"1507", 0},
+        {10586, L"1511", 0},
+        {14393, L"1607", 0},
+        {15063, L"1703", 0},
+        {16299, L"1709", 0},
+        {17134, L"1803", 0},
+        {17763, L"1809", 0},
+        {18362, L"1903", 0},
+        {18363, L"1909", 0},
+        {19041, L"2004", 0},
+        {19042, L"20H2", 0},
+        {19043, L"21H1", 1},
+        {19044, L"21H2", 1},
+        {19045, L"22H2", 1},
+        {20348, L"21H2", 2}, // Server 2022
+        {22000, L"21H2", 1},
+        {22621, L"22H2", 1},
+        {22622, L"22H2", 1},
+        {22623, L"22H2", 1},
+        {22624, L"22H2", 1},
+        {22631, L"23H2", 1},
+        {22635, L"23H2", 1},
+        {25398, L"23H2", 2}, // Server, version 23H2
+    };
+    for (const auto& e : kExact) {
+        if (e.build != build) continue;
+        if (e.kind == 1 && server) return nullptr;
+        if (e.kind == 2 && !server) return nullptr;
+        return e.label;
+    }
+    // Germanium series. GA builds are 26100/26200/26300; Insider flights sit nearby
+    // (26120, 26220, 26340). Server 2025 stays on 26100 and does not use later client series.
+    if (build >= 26000 && build <= 26199) return L"24H2";
+    if (!server) {
+        if (build >= 26200 && build <= 26299) return L"25H2";
+        if (build >= 26300 && build <= 26399) return L"26H2";
+        if (build >= 28000 && build <= 28099) return L"26H1";
+    }
+    return nullptr;
+}
+
+// Explicit "25H2" / "22H2" in a volume label or image name, when the build is unknown.
+static std::wstring find_marketing_token(const std::wstring& text) {
+    const size_t n = text.size();
+    for (size_t i = 0; i + 3 < n; ++i) {
+        wchar_t c0 = text[i], c1 = text[i + 1], c2 = text[i + 2], c3 = text[i + 3];
+        if (c0 < L'0' || c0 > L'9' || c1 < L'0' || c1 > L'9') continue;
+        if (c2 != L'H' && c2 != L'h') continue;
+        if (c3 != L'1' && c3 != L'2') continue;
+        if (i > 0 && is_ascii_alnum(text[i - 1])) continue;
+        if (i + 4 < n && is_ascii_alnum(text[i + 4])) continue;
+        int yy = (c0 - L'0') * 10 + (c1 - L'0');
+        if (yy < 20 || yy > 40) continue;
+        wchar_t buf[5] = { c0, c1, L'H', c3, 0 };
+        return buf;
+    }
+    return L"";
+}
+
+static std::wstring format_wim_os_version(const std::wstring& version, bool server) {
+    if (version.empty()) return L"—";
+    const wchar_t* rel = windows_marketing_version(parse_nt_build(version), server);
+    if (!rel || !rel[0]) return version;
+    return version + L" (" + rel + L")";
+}
+
+static void finalize_windows_display_version(WindowsInfo& win, const IsoSummary& sum) {
+    if (!win.detected && win.productVersion.empty() && win.buildNumber.empty() && win.editions.empty())
+        return;
+    bool server = windows_product_is_server(win.productVersion, win.editions);
+    if (win.displayVersion.empty() && !win.buildNumber.empty()) {
+        const wchar_t* rel = windows_marketing_version(parse_nt_build(win.buildNumber), server);
+        if (rel) win.displayVersion = rel;
+    }
+    if (win.displayVersion.empty()) {
+        std::wstring hint = sum.volId + L" " + sum.volumeSetId + L" " + sum.appId;
+        for (const auto& e : win.editions)
+            hint += L" " + e.displayName + L" " + e.name + L" " + e.description;
+        win.displayVersion = find_marketing_token(hint);
+    }
+}
+
+static std::wstring windows_detected_title(const WindowsInfo& win) {
+    std::wstring s = win.productVersion.empty() ? std::wstring(L"Windows") : win.productVersion;
+    if (!win.displayVersion.empty() && s.find(win.displayVersion) == std::wstring::npos)
+        s += L" " + win.displayVersion;
+    return s;
 }
 
 static bool path_iequals_suffix(const std::wstring& path, const std::wstring& suffix) {
@@ -2676,7 +2819,6 @@ static void analyze_windows_media(FileReader& fr, const ScanResult& scan, Window
         if (!best->version.empty()) {
             win.buildNumber = best->version;
             if (win.productVersion.empty()) win.productVersion = L"Windows";
-            win.productVersion += L" (build " + best->version + L")";
         }
         if (!best->arch.empty()) win.architecture = best->arch;
         if (!best->language.empty()) win.defaultLanguage = best->language;
@@ -2725,8 +2867,8 @@ static void analyze_windows_media(FileReader& fr, const ScanResult& scan, Window
                 for (const auto& e : win.editions) {
                     if (!e.version.empty()) { win.buildNumber = e.version; break; }
                 }
-                if (!win.buildNumber.empty() && !win.productVersion.empty())
-                    win.productVersion += L" (build " + win.buildNumber + L")";
+                if (win.productVersion.empty() && !win.buildNumber.empty())
+                    win.productVersion = L"Windows";
             }
         }
         else if (!bootEditions.empty()) {
@@ -2737,6 +2879,7 @@ static void analyze_windows_media(FileReader& fr, const ScanResult& scan, Window
     }
 
     enrich_windows_from_metadata(sum, win);
+    finalize_windows_display_version(win, sum);
     if (!win.productVersion.empty() && win.editions.empty() && sum.hasUDF && win.imageType.find(L"UDF") == std::wstring::npos)
         win.imageType = L"Windows (метаданные ISO + UDF)";
 }
@@ -3517,8 +3660,26 @@ static std::wstring generate_bare_wim_report(const wchar_t* FileToLoad, FileRead
     }
 
     std::wstring product = guess_windows_product_name(editions);
-    if (!product.empty())
-        txt << tr(L"Обнаружено", L"Detected") << L"\t" << product << L"\r\n";
+    bool server = windows_product_is_server(product, editions);
+    std::wstring rel;
+    if (!best->version.empty()) {
+        const wchar_t* mapped = windows_marketing_version(parse_nt_build(best->version), server);
+        if (mapped) rel = mapped;
+    }
+    if (rel.empty()) {
+        std::wstring hint;
+        for (const auto& e : editions)
+            hint += e.displayName + L" " + e.name + L" " + e.description + L" ";
+        rel = find_marketing_token(hint);
+    }
+    if (!product.empty() || !rel.empty()) {
+        std::wstring detected = product.empty() ? L"Windows" : product;
+        if (!rel.empty() && detected.find(rel) == std::wstring::npos)
+            detected += L" " + rel;
+        txt << tr(L"Обнаружено", L"Detected") << L"\t" << detected << L"\r\n";
+    }
+    if (!rel.empty())
+        txt << tr(L"Версия", L"Version") << L"\t" << rel << L"\r\n";
     if (!best->version.empty())
         txt << tr(L"Сборка (build)", L"Build") << L"\t" << best->version << L"\r\n";
     if (!best->arch.empty())
@@ -3536,7 +3697,7 @@ static std::wstring generate_bare_wim_report(const wchar_t* FileToLoad, FileRead
         txt << ed.index << L"\t"
             << (ed.displayName.empty() ? (ed.name.empty() ? L"—" : ed.name) : ed.displayName) << L"\t"
             << (ed.editionId.empty() ? L"—" : ed.editionId) << L"\t"
-            << (ed.version.empty() ? L"—" : ed.version) << L"\t"
+            << format_wim_os_version(ed.version, server) << L"\t"
             << (ed.arch.empty() ? L"—" : ed.arch) << L"\t"
             << (ed.language.empty() ? L"—" : ed.language) << L"\r\n";
     }
@@ -3709,7 +3870,7 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
             txt << ed.index << L"\t"
                 << (ed.displayName.empty() ? ed.name : ed.displayName) << L"\t"
                 << (ed.editionId.empty() ? L"—" : ed.editionId) << L"\t"
-                << (ed.version.empty() ? L"—" : ed.version);
+                << format_wim_os_version(ed.version, windows_product_is_server(winInfo.productVersion, winInfo.editions));
             if (!ed.arch.empty()) txt << L" (" << ed.arch << L")";
             if (!ed.language.empty()) txt << L" [" << ed.language << L"]";
             txt << L"\r\n";
@@ -3744,9 +3905,7 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
             txt << tr(L"Использует", L"Uses") << L"\t" << tr(L"Live-система (squashfs)", L"Live system (squashfs)") << L" ✅\r\n";
     }
     else if (winInfo.detected) {
-        std::wstring detected = winInfo.productVersion;
-        if (detected.empty()) detected = L"Windows";
-        txt << tr(L"Обнаружено", L"Detected") << L"\t" << detected << L"\r\n";
+        txt << tr(L"Обнаружено", L"Detected") << L"\t" << windows_detected_title(winInfo) << L"\r\n";
         if (!winInfo.buildNumber.empty())
             txt << L"Build\t" << winInfo.buildNumber << L"\r\n";
         if (sum.uefiBoot || !uefiBoots.empty()) txt << tr(L"Использует", L"Uses") << L"\tEFI ✅\r\n";
@@ -3876,7 +4035,9 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         txt << L"🪟 Windows\t\r\n";
         txt << tr(L"Тип образа", L"Image type") << L"\t"
             << (winInfo.imageType.empty() ? L"Windows" : winInfo.imageType) << L"\r\n";
-        if (!winInfo.productVersion.empty())
+        if (!winInfo.displayVersion.empty())
+            txt << tr(L"Версия", L"Version") << L"\t" << winInfo.displayVersion << L"\r\n";
+        else if (!winInfo.productVersion.empty())
             txt << tr(L"Версия", L"Version") << L"\t" << winInfo.productVersion << L"\r\n";
         if (!winInfo.buildNumber.empty())
             txt << tr(L"Сборка (build)", L"Build") << L"\t" << winInfo.buildNumber << L"\r\n";

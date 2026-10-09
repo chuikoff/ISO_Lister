@@ -26,13 +26,13 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 **Сводка (как Rufus)** — в начале отчёта:
 - тип файловой системы (ISO 9660, UDF, Joliet, Rock Ridge);
 - Boot Marker, UEFI bootloaders и подписи bootmgr;
-- **Detected** — Windows (версия, build), Linux (дистрибутив, архитектура);
+- **Detected** — Windows (25H2/22H2, сборка), Linux (дистрибутив, архитектура);
 - **Uses** — EFI, BIOS, install.wim/esd, live squashfs;
 - таблица **редакций WIM** (имя, EditionID, версия, язык).
 
 **Подробности** (полный Lister, F3):
 - PVD/SVD ISO 9660, UDF NSR, El Torito Boot Catalog;
-- раздел **Windows** — ei.cfg, канал, редакции из XML WIM/ESD;
+- раздел **Windows** — выпуск (25H2/22H2), ei.cfg, канал, редакции из XML WIM/ESD;
 - раздел **Linux** — `/.disk/info`, casper, ядро, initrd;
 - крупнейшие файлы, конфиги, опционально — полный список файлов и Boot Catalog.
 
@@ -40,7 +40,7 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 
 ### Установка
 
-1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.11.zip`.
+1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.12.zip`.
 2. Откройте архив в Total Commander — появится диалог автоустановки (`pluginst.inf`).
 3. Путь по умолчанию: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Полностью перезапустите Total Commander.**
@@ -150,13 +150,13 @@ MIT — см. [LICENSE](LICENSE).
 **Summary (Rufus-style)** at the top:
 - filesystem type (ISO 9660, UDF, Joliet, Rock Ridge);
 - Boot Marker, UEFI bootloaders, bootmgr signatures;
-- **Detected** — Windows (version, build), Linux (distro, architecture);
+- **Detected** — Windows (25H2/22H2, build), Linux (distro, architecture);
 - **Uses** — EFI, BIOS, install.wim/esd, live squashfs;
 - **WIM editions** table (name, EditionID, version, language).
 
 **Details** (full Lister, F3):
 - ISO 9660 PVD/SVD, UDF NSR, El Torito Boot Catalog;
-- **Windows** — ei.cfg, channel, editions from WIM/ESD XML;
+- **Windows** — release (25H2/22H2), ei.cfg, channel, editions from WIM/ESD XML;
 - **Linux** — `/.disk/info`, casper, kernel, initrd;
 - largest files, config hits; optional full file list and Boot Catalog.
 
@@ -164,7 +164,7 @@ MIT — см. [LICENSE](LICENSE).
 
 ### Installation
 
-1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.11.zip`.
+1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.12.zip`.
 2. Open the ZIP in Total Commander — auto-install dialog appears (`pluginst.inf`).
 3. Default path: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Restart Total Commander completely.**
