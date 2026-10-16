@@ -15,7 +15,7 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 | Расширение | Тип | Что определяется |
 |------------|-----|------------------|
 | `.iso` | ISO 9660 / UDF | Метка тома, Joliet, Rock Ridge, El Torito, UEFI/BIOS, Windows/Linux |
-| `.img` | Raw-образ диска | MBR/GPT, разделы, FAT/NTFS, загрузочный код |
+| `.img` | Raw-образ диска | MBR/GPT, разделы, FAT/NTFS/Ext2-4/Btrfs/XFS/Squashfs/Swap, UUID, загрузочный код |
 | `.bin` | Raw dump | То же, что `.img` (MBR/GPT по сигнатурам / размеру) |
 | `.vhd` / `.vhdx` | Hyper-V | Метаданные VHD; fixed VHD — разбор MBR/GPT |
 | `.wim` / `.esd` | Windows Imaging | Standalone WIM/ESD: MSWIM, число образов, таблица редакций |
@@ -26,7 +26,7 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 **Сводка (как Rufus)** — в начале отчёта:
 - тип файловой системы (ISO 9660, UDF, Joliet, Rock Ridge);
 - Boot Marker, UEFI bootloaders и подписи bootmgr;
-- **Detected** — Windows (25H2/22H2, сборка), Linux (дистрибутив, архитектура);
+- **Detected** — Windows (25H2/22H2, сборка, обходы проверок Win11), Linux (дистрибутив, архитектура);
 - **Uses** — EFI, BIOS, install.wim/esd, live squashfs;
 - таблица **редакций WIM** (имя, EditionID, версия, язык).
 
@@ -40,7 +40,7 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 
 ### Установка
 
-1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.13.zip`.
+1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.14.zip`.
 2. Откройте архив в Total Commander — появится диалог автоустановки (`pluginst.inf`).
 3. Путь по умолчанию: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Полностью перезапустите Total Commander.**
@@ -139,7 +139,7 @@ MIT — см. [LICENSE](LICENSE).
 | Extension | Type | Detected information |
 |-----------|------|----------------------|
 | `.iso` | ISO 9660 / UDF | Volume label, Joliet, Rock Ridge, El Torito, UEFI/BIOS, Windows/Linux |
-| `.img` | Raw disk image | MBR/GPT, partitions, FAT/NTFS, boot code |
+| `.img` | Raw disk image | MBR/GPT, partitions, FAT/NTFS/Ext2-4/Btrfs/XFS/Squashfs/Swap, UUID, boot code |
 | `.bin` | Raw dump | Same as `.img` (MBR/GPT by signature / size) |
 | `.vhd` / `.vhdx` | Hyper-V | VHD metadata; fixed VHD — MBR/GPT layout |
 | `.wim` / `.esd` | Windows Imaging | Standalone WIM/ESD: MSWIM, image count, editions table |
@@ -150,7 +150,7 @@ MIT — см. [LICENSE](LICENSE).
 **Summary (Rufus-style)** at the top:
 - filesystem type (ISO 9660, UDF, Joliet, Rock Ridge);
 - Boot Marker, UEFI bootloaders, bootmgr signatures;
-- **Detected** — Windows (25H2/22H2, build), Linux (distro, architecture);
+- **Detected** — Windows (25H2/22H2, build, Win11 bypasses), Linux (distro, architecture);
 - **Uses** — EFI, BIOS, install.wim/esd, live squashfs;
 - **WIM editions** table (name, EditionID, version, language).
 
@@ -164,7 +164,7 @@ MIT — см. [LICENSE](LICENSE).
 
 ### Installation
 
-1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.13.zip`.
+1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.14.zip`.
 2. Open the ZIP in Total Commander — auto-install dialog appears (`pluginst.inf`).
 3. Default path: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Restart Total Commander completely.**

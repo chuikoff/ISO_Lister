@@ -400,6 +400,16 @@ static uint64_t rd_le64(const uint8_t* p) {
     return (uint64_t)rd_le32(p) | ((uint64_t)rd_le32(p + 4) << 32);
 }
 
+static uint16_t rd_be16(const uint8_t* p) {
+    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
+}
+static uint32_t rd_be32(const uint8_t* p) {
+    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
+}
+static uint64_t rd_be64(const uint8_t* p) {
+    return ((uint64_t)rd_be32(p) << 32) | rd_be32(p + 4);
+}
+
 // -----------------------------------------------------------------------------
 // Дата/время ISO9660 (17 байт: YYYYMMDDHHMMSSccTZ)
 // -----------------------------------------------------------------------------
@@ -578,6 +588,7 @@ struct DiskPartitionInfo {
     std::wstring fsName;
     std::wstring fsDetail;
     std::wstring volumeLabel;
+    std::wstring uuid;
     std::wstring oemId;
 };
 
@@ -593,17 +604,69 @@ static bool guid_equal(const uint8_t* a, const uint8_t* b) {
     return memcmp(a, b, 16) == 0;
 }
 
+static std::wstring format_raw_uuid(const uint8_t* u) {
+    bool allZero = true;
+    for (int i = 0; i < 16; ++i) {
+        if (u[i] != 0) { allZero = false; break; }
+    }
+    if (allZero) return L"";
+    wchar_t buf[40];
+    StringCchPrintfW(buf, 40, L"%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+        u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7],
+        u[8], u[9], u[10], u[11], u[12], u[13], u[14], u[15]);
+    return buf;
+}
+
+// EFI System: 28732AC1-1FF8-D211-BA4B-00A0C93EC93B
 static const uint8_t kGuidEfiSystem[] = {
     0x28,0x73,0x2A,0xC1,0x1F,0xF8,0xD2,0x11,0xBA,0x4B,0x00,0xA0,0xC9,0x3E,0xC9,0x3B };
+// Microsoft Basic Data: EBD0A0A2-B9E5-4433-87C0-68B6B72699C7
 static const uint8_t kGuidMsBasicData[] = {
     0xA2,0xA0,0xD0,0xEB,0xE5,0xB9,0x33,0x44,0x87,0xC0,0x68,0xB6,0xB7,0x26,0x99,0xC7 };
+// Linux filesystem: 0FC63DAF-8483-4772-8E79-3D69D8477DE4
 static const uint8_t kGuidLinuxFs[] = {
     0xAF,0x3D,0xC6,0x0F,0x83,0x84,0x72,0x47,0x8E,0x79,0x3D,0x69,0xD8,0x47,0x7D,0xE4 };
+// Linux swap: 0657FD6D-A4AB-43C4-84E5-0933C84B4F4F
+static const uint8_t kGuidLinuxSwap[] = {
+    0x6D,0xFD,0x57,0x06,0xAB,0xA4,0xC4,0x43,0x84,0xE5,0x09,0x33,0xC8,0x4B,0x4F,0x4F };
+// Linux Root x86-64: 4F68BCE3-E8CD-4DB1-96E7-FBCAF984B709
+static const uint8_t kGuidLinuxRootX64[] = {
+    0xE3,0xBC,0x68,0x4F,0xCD,0xE8,0xB1,0x4D,0x96,0xE7,0xFB,0xCA,0xF9,0x84,0xB7,0x09 };
+// Linux Root ARM64: B921B045-1DF0-41C3-AF44-4C6F280D3FAE
+static const uint8_t kGuidLinuxRootArm64[] = {
+    0x45,0xB0,0x21,0xB9,0xF0,0x1D,0xC3,0x41,0xAF,0x44,0x4C,0x6F,0x28,0x0D,0x3F,0xAE };
+// Linux Home: 933AC7E1-2EB4-4F13-B844-0E14E2AEF0F5
+static const uint8_t kGuidLinuxHome[] = {
+    0xE1,0xC7,0x3A,0x93,0xB4,0x2E,0x13,0x4F,0xB8,0x44,0x0E,0x14,0xE2,0xAE,0xF0,0xF5 };
+// Linux LVM: E6D6D379-F507-44C2-A23C-238F2A3DF928
+static const uint8_t kGuidLinuxLvm[] = {
+    0x79,0xD3,0xD6,0xE6,0x07,0xF5,0xC2,0x44,0xA2,0x3C,0x23,0x8F,0x2A,0x3D,0xF9,0x28 };
+// Linux RAID: A19D880F-05FC-4D3B-A006-743F0F84911E
+static const uint8_t kGuidLinuxRaid[] = {
+    0x0F,0x88,0x9D,0xA1,0xFC,0x05,0x3B,0x4D,0xA0,0x06,0x74,0x3F,0x0F,0x84,0x91,0x1E };
+// BIOS Boot: 21686148-6449-6E6F-744E-656564454649
+static const uint8_t kGuidBiosBoot[] = {
+    0x48,0x61,0x68,0x21,0x49,0x64,0x6F,0x6E,0x74,0x4E,0x65,0x65,0x64,0x45,0x46,0x49 };
+// Microsoft Reserved: E3C9E316-0B5C-4DB8-817D-F92DF00215AE
+static const uint8_t kGuidMsr[] = {
+    0x16,0xE3,0xC9,0xE3,0x5C,0x0B,0xB8,0x4D,0x81,0x7D,0xF9,0x2D,0xF0,0x02,0x15,0xAE };
+// Windows Recovery / WinRE: DE94BBA4-06D1-4D40-A16A-BFD50179D6AC
+static const uint8_t kGuidWinRecovery[] = {
+    0xA4,0xBB,0x94,0xDE,0xD1,0x06,0x40,0x4D,0xA1,0x6A,0xBF,0xD5,0x01,0x79,0xD6,0xAC };
 
 static std::wstring gpt_type_name(const uint8_t* typeGuid) {
     if (guid_equal(typeGuid, kGuidEfiSystem)) return L"EFI System";
     if (guid_equal(typeGuid, kGuidMsBasicData)) return L"Microsoft Basic Data";
     if (guid_equal(typeGuid, kGuidLinuxFs)) return L"Linux filesystem";
+    if (guid_equal(typeGuid, kGuidLinuxSwap)) return L"Linux swap";
+    if (guid_equal(typeGuid, kGuidLinuxRootX64)) return L"Linux root (x86-64)";
+    if (guid_equal(typeGuid, kGuidLinuxRootArm64)) return L"Linux root (ARM64)";
+    if (guid_equal(typeGuid, kGuidLinuxHome)) return L"Linux /home";
+    if (guid_equal(typeGuid, kGuidLinuxLvm)) return L"Linux LVM";
+    if (guid_equal(typeGuid, kGuidLinuxRaid)) return L"Linux RAID";
+    if (guid_equal(typeGuid, kGuidBiosBoot)) return L"BIOS Boot";
+    if (guid_equal(typeGuid, kGuidMsr)) return L"Microsoft Reserved (MSR)";
+    if (guid_equal(typeGuid, kGuidWinRecovery)) return L"Windows Recovery (WinRE)";
     wchar_t buf[64];
     StringCchPrintfW(buf, 64, L"%02X%02X%02X%02X-...",
         typeGuid[3], typeGuid[2], typeGuid[1], typeGuid[0]);
@@ -611,49 +674,171 @@ static std::wstring gpt_type_name(const uint8_t* typeGuid) {
 }
 
 static void detect_fs_vbr(FileReader& fr, uint64_t startLBA, DiskPartitionInfo& part) {
+    uint64_t partOffset = startLBA * DISK_SECTOR_SIZE;
     uint8_t vbr[512];
-    if (!fr.read_at(startLBA * DISK_SECTOR_SIZE, vbr, 512) || !has_boot_signature(vbr))
-        return;
+    bool hasVbr = fr.read_at(partOffset, vbr, 512);
 
-    part.oemId = trim_ascii_label((const char*)vbr + 3, 8);
-    if (memcmp(vbr + 3, "NTFS    ", 8) == 0) {
-        part.fsName = L"NTFS";
-        uint16_t bps = rd_le16(vbr + 11);
-        uint8_t spc = vbr[13];
-        uint64_t total = rd_le64(vbr + 48);
+    if (hasVbr && has_boot_signature(vbr)) {
+        part.oemId = trim_ascii_label((const char*)vbr + 3, 8);
+        if (memcmp(vbr + 3, "NTFS    ", 8) == 0) {
+            part.fsName = L"NTFS";
+            uint16_t bps = rd_le16(vbr + 11);
+            uint8_t spc = vbr[13];
+            uint64_t total = rd_le64(vbr + 48);
+            wchar_t buf[128];
+            StringCchPrintfW(buf, 128, L"%u байт/сек, %u сек/кластер, %llu секторов",
+                bps, spc, total);
+            part.fsDetail = buf;
+            return;
+        }
+        if (memcmp(vbr + 3, "EXFAT   ", 8) == 0) {
+            part.fsName = L"exFAT";
+            return;
+        }
+        if (memcmp(vbr + 82, "FAT32   ", 8) == 0 || part.mbrType == 0x0B || part.mbrType == 0x0C) {
+            part.fsName = L"FAT32";
+            part.volumeLabel = trim_ascii_label((const char*)vbr + 0x47, 11);
+            if (part.volumeLabel.empty())
+                part.volumeLabel = trim_ascii_label((const char*)vbr + 0x5B, 11);
+            uint16_t bps = rd_le16(vbr + 11);
+            uint8_t spc = vbr[13];
+            uint32_t total32 = rd_le32(vbr + 32);
+            wchar_t buf[128];
+            StringCchPrintfW(buf, 128, L"%u байт/сек, %u сек/кластер, %u секторов",
+                bps, spc, total32);
+            part.fsDetail = buf;
+            return;
+        }
+        if (memcmp(vbr + 54, "FAT16   ", 8) == 0 || memcmp(vbr + 54, "FAT12   ", 8) == 0) {
+            part.fsName = memcmp(vbr + 54, "FAT12   ", 8) == 0 ? L"FAT12" : L"FAT16";
+            part.volumeLabel = trim_ascii_label((const char*)vbr + 0x2B, 11);
+            return;
+        }
+        if (memcmp(vbr + 3, "MSDOS5.0", 8) == 0 || memcmp(vbr + 3, "mkfs.fat", 8) == 0 ||
+            memcmp(vbr + 3, "MSWIN4.1", 8) == 0) {
+            part.fsName = L"FAT";
+            part.volumeLabel = trim_ascii_label((const char*)vbr + 0x47, 11);
+            return;
+        }
+    }
+
+    // --- XFS (superblock at offset 0, magic 'XFSB' = 0x58 0x46 0x53 0x42) ---
+    if (hasVbr && memcmp(vbr, "XFSB", 4) == 0) {
+        part.fsName = L"XFS";
+        uint32_t blockSize = rd_be32(vbr + 4);
+        uint64_t dblocks = rd_be64(vbr + 8);
+        part.uuid = format_raw_uuid(vbr + 32);
+        part.volumeLabel = trim_ascii_label((const char*)vbr + 108, 12);
+        if (blockSize > 0 && dblocks > 0) {
+            uint64_t totalBytes = dblocks * (uint64_t)blockSize;
+            wchar_t buf[128];
+            StringCchPrintfW(buf, 128, L"%u байт/блок, %llu блоков (%s)",
+                blockSize, dblocks, FormatFileSize(totalBytes).c_str());
+            part.fsDetail = buf;
+        }
+        return;
+    }
+
+    // --- Squashfs (superblock at offset 0, magic 'sqsh' = 0x73717368 or 'hsqs' = 0x68737173) ---
+    if (hasVbr && (memcmp(vbr, "sqsh", 4) == 0 || memcmp(vbr, "hsqs", 4) == 0)) {
+        part.fsName = L"Squashfs";
+        bool be = (memcmp(vbr, "hsqs", 4) == 0);
+        uint16_t comp = be ? rd_be16(vbr + 20) : rd_le16(vbr + 20);
+        uint16_t major = be ? rd_be16(vbr + 28) : rd_le16(vbr + 28);
+        uint16_t minor = be ? rd_be16(vbr + 30) : rd_le16(vbr + 30);
+        uint64_t bytesUsed = be ? rd_be64(vbr + 40) : rd_le64(vbr + 40);
+        const wchar_t* compName = comp == 1 ? L"gzip" : comp == 2 ? L"lzma" : comp == 3 ? L"lzo" :
+            comp == 4 ? L"xz" : comp == 5 ? L"lz4" : comp == 6 ? L"zstd" : L"unknown";
         wchar_t buf[128];
-        StringCchPrintfW(buf, 128, L"%u байт/сек, %u сек/кластер, %llu секторов",
-            bps, spc, total);
+        StringCchPrintfW(buf, 128, L"v%u.%u (%s), %s", major, minor, compName, FormatFileSize(bytesUsed).c_str());
         part.fsDetail = buf;
         return;
     }
-    if (memcmp(vbr + 3, "EXFAT   ", 8) == 0) {
-        part.fsName = L"exFAT";
-        return;
+
+    // --- Ext2 / Ext3 / Ext4 (superblock at offset 1024, magic 0xEF53 at offset 56) ---
+    uint8_t extSb[1024];
+    if (fr.read_at(partOffset + 1024, extSb, sizeof(extSb))) {
+        uint16_t magic = rd_le16(extSb + 56);
+        if (magic == 0xEF53) {
+            uint32_t compat = rd_le32(extSb + 92);
+            uint32_t incompat = rd_le32(extSb + 96);
+            uint32_t roCompat = rd_le32(extSb + 100);
+
+            if ((incompat & 0x0240) != 0 || (roCompat & 0x0478) != 0) {
+                part.fsName = L"Ext4";
+            }
+            else if ((compat & 0x0004) != 0) {
+                part.fsName = L"Ext3";
+            }
+            else {
+                part.fsName = L"Ext2";
+            }
+
+            part.uuid = format_raw_uuid(extSb + 104);
+            part.volumeLabel = trim_ascii_label((const char*)extSb + 120, 16);
+
+            uint32_t logBlockSize = rd_le32(extSb + 24);
+            uint64_t blockSize = 1024ULL << (logBlockSize <= 6 ? logBlockSize : 0);
+            uint64_t blocksCount = rd_le32(extSb + 4);
+            if ((incompat & 0x0040) != 0) {
+                blocksCount |= ((uint64_t)rd_le32(extSb + 336) << 32);
+            }
+            uint64_t totalBytes = blocksCount * blockSize;
+
+            wchar_t buf[128];
+            StringCchPrintfW(buf, 128, L"%llu байт/блок, %llu блоков (%s)",
+                blockSize, blocksCount, FormatFileSize(totalBytes).c_str());
+            part.fsDetail = buf;
+            return;
+        }
     }
-    if (memcmp(vbr + 82, "FAT32   ", 8) == 0 || part.mbrType == 0x0B || part.mbrType == 0x0C) {
-        part.fsName = L"FAT32";
-        part.volumeLabel = trim_ascii_label((const char*)vbr + 0x47, 11);
-        if (part.volumeLabel.empty())
-            part.volumeLabel = trim_ascii_label((const char*)vbr + 0x5B, 11);
-        uint16_t bps = rd_le16(vbr + 11);
-        uint8_t spc = vbr[13];
-        uint32_t total32 = rd_le32(vbr + 32);
-        wchar_t buf[128];
-        StringCchPrintfW(buf, 128, L"%u байт/сек, %u сек/кластер, %u секторов",
-            bps, spc, total32);
-        part.fsDetail = buf;
-        return;
+
+    // --- Btrfs (superblock at offset 65536 = 64KB, magic "_BHRfS_M" at offset 64) ---
+    uint8_t btrfsSb[512];
+    if (fr.read_at(partOffset + 65536, btrfsSb, sizeof(btrfsSb))) {
+        if (memcmp(btrfsSb + 64, "_BHRfS_M", 8) == 0) {
+            part.fsName = L"Btrfs";
+            part.uuid = format_raw_uuid(btrfsSb + 32);
+            uint64_t totalBytes = rd_le64(btrfsSb + 144);
+            uint32_t secSize = rd_le32(btrfsSb + 168);
+            uint32_t nodeSize = rd_le32(btrfsSb + 172);
+            part.volumeLabel = trim_ascii_label((const char*)btrfsSb + 299, 256);
+
+            wchar_t buf[128];
+            StringCchPrintfW(buf, 128, L"node %u, sector %u, %s",
+                nodeSize, secSize, FormatFileSize(totalBytes).c_str());
+            part.fsDetail = buf;
+            return;
+        }
     }
-    if (memcmp(vbr + 54, "FAT16   ", 8) == 0 || memcmp(vbr + 54, "FAT12   ", 8) == 0) {
-        part.fsName = memcmp(vbr + 54, "FAT12   ", 8) == 0 ? L"FAT12" : L"FAT16";
-        part.volumeLabel = trim_ascii_label((const char*)vbr + 0x2B, 11);
-        return;
+
+    // --- Linux swap (magic "SWAPSPACE2" or "SWAP-SPACE" at offset 4086) ---
+    uint8_t swapHdr[4096];
+    if (fr.read_at(partOffset, swapHdr, sizeof(swapHdr))) {
+        if (memcmp(swapHdr + 4086, "SWAPSPACE2", 10) == 0 || memcmp(swapHdr + 4086, "SWAP-SPACE", 10) == 0) {
+            part.fsName = L"Linux swap";
+            if (memcmp(swapHdr + 4086, "SWAPSPACE2", 10) == 0) {
+                uint32_t lastPage = rd_le32(swapHdr + 1028);
+                part.uuid = format_raw_uuid(swapHdr + 1036);
+                part.volumeLabel = trim_ascii_label((const char*)swapHdr + 1052, 16);
+                uint64_t totalBytes = (uint64_t)lastPage * 4096;
+                wchar_t buf[128];
+                StringCchPrintfW(buf, 128, L"v2, %s", FormatFileSize(totalBytes).c_str());
+                part.fsDetail = buf;
+            }
+            else {
+                part.fsDetail = L"v1";
+            }
+            return;
+        }
     }
-    if (memcmp(vbr + 3, "MSDOS5.0", 8) == 0 || memcmp(vbr + 3, "mkfs.fat", 8) == 0 ||
-        memcmp(vbr + 3, "MSWIN4.1", 8) == 0) {
-        part.fsName = L"FAT";
-        part.volumeLabel = trim_ascii_label((const char*)vbr + 0x47, 11);
+
+    // --- ISO9660 embedded in partition (offset 16 * 2048) ---
+    uint8_t isoPvd[2048];
+    if (fr.read_at(partOffset + 16 * 2048, isoPvd, sizeof(isoPvd)) && is_cd001(isoPvd)) {
+        part.fsName = L"ISO9660";
+        part.volumeLabel = trim_ascii_label((const char*)isoPvd + 40, 32);
+        return;
     }
 }
 
@@ -767,6 +952,7 @@ static void append_disk_partitions(std::wostringstream& txt, FileReader& fr, con
         if (!p.fsName.empty()) txt << L"  " << tr(L"ФС", L"FS") << L"\t" << p.fsName << L" ✅\r\n";
         if (!p.fsDetail.empty()) txt << L"  " << tr(L"Детали ФС", L"FS details") << L"\t" << p.fsDetail << L"\r\n";
         if (!p.volumeLabel.empty()) txt << L"  " << tr(L"Метка тома", L"Volume label") << L"\t'" << p.volumeLabel << L"'\r\n";
+        if (!p.uuid.empty()) txt << L"  UUID\t" << p.uuid << L"\r\n";
         if (!p.oemId.empty()) txt << L"  OEM ID\t" << p.oemId << L"\r\n";
         txt << L"\r\n";
     }
@@ -888,16 +1074,6 @@ static std::wstring generate_vhd_report(const wchar_t* FileToLoad, FileReader& f
 // -----------------------------------------------------------------------------
 // Apple Disk Image (UDIF / .dmg)
 // -----------------------------------------------------------------------------
-static uint16_t rd_be16(const uint8_t* p) {
-    return (uint16_t)(((uint16_t)p[0] << 8) | p[1]);
-}
-static uint32_t rd_be32(const uint8_t* p) {
-    return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | (uint32_t)p[3];
-}
-static uint64_t rd_be64(const uint8_t* p) {
-    return ((uint64_t)rd_be32(p) << 32) | rd_be32(p + 4);
-}
-
 static bool b64val(int c) {
     if (c >= 'A' && c <= 'Z') return true;
     if (c >= 'a' && c <= 'z') return true;
@@ -1593,6 +1769,10 @@ struct WindowsInfo {
     uint64_t bootImageSize = 0;
     std::vector<std::wstring> eiCfgEditions;
     std::vector<WimImageInfo> editions;
+    bool hasAutounattend = false;
+    std::wstring autounattendPath;
+    std::vector<std::wstring> bypassHints;
+    std::vector<std::wstring> unattendedTweaks;
 };
 
 struct LinuxInfo {
@@ -1605,6 +1785,9 @@ struct LinuxInfo {
     std::wstring diskInfoLine;
     std::wstring kernelPath;
     std::wstring squashfsPath;
+    std::wstring prettyName;
+    std::wstring osReleaseId;
+    std::wstring osReleaseVersionId;
 };
 
 static bool read_iso_file_bytes(FileReader& fr, uint32_t lba, uint64_t fileSize,
@@ -1830,6 +2013,147 @@ static void parse_ei_cfg_text(const std::string& text, WindowsInfo& win) {
             win.eiCfgEditions.push_back(wval);
         if (sec.find(L"VL") != std::wstring::npos && win.channel.empty())
             win.channel = L"Volume";
+    }
+}
+
+static std::wstring text_bytes_to_wstring(const uint8_t* data, size_t size) {
+    if (!data || size == 0) return L"";
+    if (size >= 2 && data[0] == 0xFF && data[1] == 0xFE) {
+        size_t wlen = (size - 2) / sizeof(wchar_t);
+        return std::wstring((const wchar_t*)(data + 2), wlen);
+    }
+    if (size >= 2 && data[0] == 0xFE && data[1] == 0xFF) {
+        std::wstring out;
+        out.reserve((size - 2) / 2);
+        for (size_t i = 2; i + 1 < size; i += 2) {
+            out.push_back((wchar_t)((data[i] << 8) | data[i + 1]));
+        }
+        return out;
+    }
+    if (size >= 4 && data[1] == 0x00 && data[3] == 0x00) {
+        size_t wlen = size / sizeof(wchar_t);
+        return std::wstring((const wchar_t*)data, wlen);
+    }
+    int wlen = MultiByteToWideChar(CP_UTF8, 0, (const char*)data, (int)size, nullptr, 0);
+    if (wlen > 0) {
+        std::wstring out(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, (const char*)data, (int)size, &out[0], wlen);
+        if (!out.empty() && out.back() == L'\0') out.pop_back();
+        return out;
+    }
+    wlen = MultiByteToWideChar(CP_ACP, 0, (const char*)data, (int)size, nullptr, 0);
+    if (wlen > 0) {
+        std::wstring out(wlen, L'\0');
+        MultiByteToWideChar(CP_ACP, 0, (const char*)data, (int)size, &out[0], wlen);
+        if (!out.empty() && out.back() == L'\0') out.pop_back();
+        return out;
+    }
+    return L"";
+}
+
+static void parse_unattend_xml(const std::wstring& xml, WindowsInfo& win) {
+    std::wstring lower = ToLower(xml);
+
+    auto add_bypass = [&](const std::wstring& s) {
+        for (const auto& existing : win.bypassHints) {
+            if (existing == s) return;
+        }
+        win.bypassHints.push_back(s);
+    };
+
+    auto add_tweak = [&](const std::wstring& s) {
+        for (const auto& existing : win.unattendedTweaks) {
+            if (existing == s) return;
+        }
+        win.unattendedTweaks.push_back(s);
+    };
+
+    if (lower.find(L"bypasstpmcheck") != std::wstring::npos)
+        add_bypass(L"TPM 2.0 (BypassTPMCheck)");
+    if (lower.find(L"bypasssecurebootcheck") != std::wstring::npos)
+        add_bypass(L"Secure Boot (BypassSecureBootCheck)");
+    if (lower.find(L"bypassramcheck") != std::wstring::npos)
+        add_bypass(L"RAM (BypassRAMCheck)");
+    if (lower.find(L"bypasscpucheck") != std::wstring::npos)
+        add_bypass(L"CPU (BypassCPUCheck)");
+    if (lower.find(L"bypassstoragecheck") != std::wstring::npos || lower.find(L"bypassdiskcheck") != std::wstring::npos)
+        add_bypass(L"Storage / Disk (BypassStorageCheck)");
+    if (lower.find(L"bypassnro") != std::wstring::npos)
+        add_bypass(L"Локальная учетная запись без интернета (BypassNRO)");
+    if (lower.find(L"preventdeviceencryption") != std::wstring::npos)
+        add_bypass(L"Шифрование BitLocker отключено (PreventDeviceEncryption)");
+
+    if (lower.find(L"<autologon>") != std::wstring::npos)
+        add_tweak(L"Автоматический вход в систему (AutoLogon)");
+    if (lower.find(L"<localaccounts>") != std::wstring::npos || lower.find(L"<useraccounts>") != std::wstring::npos)
+        add_tweak(L"Создание локальной учетной записи");
+    if (lower.find(L"<protectyourpc>3</protectyourpc>") != std::wstring::npos)
+        add_tweak(L"Отключены телеметрия и сбор данных (ProtectYourPC=3)");
+    if (lower.find(L"<productkey>") != std::wstring::npos && lower.find(L"<key>") != std::wstring::npos)
+        add_tweak(L"Предустановленный ключ продукта (ProductKey)");
+
+    std::wstring regOwner = xml_get_elem_text(xml, L"RegisteredOwner");
+    std::wstring regOrg = xml_get_elem_text(xml, L"RegisteredOrganization");
+    if (!regOwner.empty() && regOwner != L"Owner") {
+        std::wstring s = L"Пользователь: " + regOwner;
+        if (!regOrg.empty()) s += L" (" + regOrg + L")";
+        add_tweak(s);
+    }
+}
+
+static void parse_os_release_text(const std::string& text, LinuxInfo& linux) {
+    std::istringstream ss(text);
+    std::string line;
+    std::wstring prettyName, name, versionId, versionStr, idStr, buildId;
+
+    while (std::getline(ss, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\t'))
+            line.pop_back();
+        if (line.empty() || line[0] == '#') continue;
+
+        size_t eq = line.find('=');
+        if (eq == std::string::npos) continue;
+
+        std::string key = line.substr(0, eq);
+        std::string val = line.substr(eq + 1);
+
+        if (val.size() >= 2 && ((val.front() == '"' && val.back() == '"') || (val.front() == '\'' && val.back() == '\''))) {
+            val = val.substr(1, val.size() - 2);
+        }
+
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, val.c_str(), -1, nullptr, 0);
+        std::wstring wval;
+        if (wlen > 1) {
+            wval.resize(wlen - 1);
+            MultiByteToWideChar(CP_UTF8, 0, val.c_str(), -1, &wval[0], wlen);
+        }
+
+        if (key == "PRETTY_NAME") prettyName = wval;
+        else if (key == "NAME") name = wval;
+        else if (key == "VERSION_ID") versionId = wval;
+        else if (key == "VERSION") versionStr = wval;
+        else if (key == "ID") idStr = wval;
+        else if (key == "BUILD_ID") buildId = wval;
+    }
+
+    if (!prettyName.empty()) linux.prettyName = prettyName;
+    if (!idStr.empty()) linux.osReleaseId = idStr;
+    if (!versionId.empty()) linux.osReleaseVersionId = versionId;
+
+    if (!prettyName.empty() && (linux.distro.empty() || linux.distro == L"Linux")) {
+        linux.distro = prettyName;
+    }
+    else if (!name.empty() && (linux.distro.empty() || linux.distro == L"Linux")) {
+        linux.distro = name;
+    }
+    else if (!idStr.empty() && (linux.distro.empty() || linux.distro == L"Linux")) {
+        linux.distro = idStr;
+    }
+
+    if (linux.version.empty()) {
+        if (!versionId.empty()) linux.version = versionId;
+        else if (!versionStr.empty()) linux.version = versionStr;
+        else if (!buildId.empty()) linux.version = buildId;
     }
 }
 
@@ -2149,11 +2473,34 @@ static ScanResult bfs_scan(FileReader& fr,
         static const wchar_t* kWinSuffixes[] = {
             L"/sources/install.wim", L"/sources/install.esd", L"/sources/boot.wim",
             L"/sources/ei.cfg", L"/setup.exe", L"/bootmgr", L"/bootmgr.efi",
-            L"/sources/bootmgr", L"/sources/bootmgr.efi", L"/sources/install.wim.xml"
+            L"/sources/bootmgr", L"/sources/bootmgr.efi", L"/sources/install.wim.xml",
+            L"/autounattend.xml", L"/unattend.xml",
+            L"/sources/autounattend.xml", L"/sources/unattend.xml",
+            L"/sources/appraiserres.dll"
         };
         for (const wchar_t* suf : kWinSuffixes) {
             if (path_iequals_suffix(fullPath, suf)) {
                 res.winFiles.push_back({ fullPath, e.lba, e.size });
+                break;
+            }
+        }
+    };
+
+    auto track_linux_file = [&](const std::wstring& fullPath, const DirEntry& e) {
+        static const wchar_t* kLinuxSuffixes[] = {
+            L"/.disk/info", L"/.disk/cd_type", L"/.disk/base_installable",
+            L"/etc/os-release", L"/usr/lib/os-release",
+            L"/arch/version", L"/alpine.version",
+            L"/casper/vmlinuz", L"/casper/filesystem.squashfs", L"/casper/filesystem.manifest",
+            L"/boot/grub/grub.cfg", L"/isolinux/isolinux.cfg",
+            L"/live/filesystem.squashfs", L"/live/vmlinuz"
+        };
+        for (const wchar_t* suf : kLinuxSuffixes) {
+            if (path_iequals_suffix(fullPath, suf)) {
+                for (const auto& w : res.linuxFiles) {
+                    if (ToLower(w.path) == ToLower(fullPath)) return;
+                }
+                res.linuxFiles.push_back({ fullPath, e.lba, e.size });
                 break;
             }
         }
@@ -2194,6 +2541,7 @@ static ScanResult bfs_scan(FileReader& fr,
 
             if (!e.isDir) {
                 track_windows_file(fullPath, e);
+                track_linux_file(fullPath, e);
                 track_largest(fullPath, e);
                 if (lower == L"isolinux.bin" || lower == L"ldlinux.c32" || lower == L"isolinux.cfg")
                     res.foundISOLINUX = true;
@@ -2374,7 +2722,10 @@ static void udf_scan_directory(FileReader& fr, uint32_t partBase, uint32_t dirLb
         if (!isDir) {
             static const wchar_t* kWinSuffixes[] = {
                 L"/sources/install.wim", L"/sources/install.esd", L"/sources/boot.wim",
-                L"/sources/ei.cfg", L"/setup.exe"
+                L"/sources/ei.cfg", L"/setup.exe", L"/bootmgr", L"/bootmgr.efi",
+                L"/autounattend.xml", L"/unattend.xml",
+                L"/sources/autounattend.xml", L"/sources/unattend.xml",
+                L"/sources/appraiserres.dll"
             };
             for (const wchar_t* suf : kWinSuffixes) {
                 if (path_iequals_suffix(full, suf)) {
@@ -2382,6 +2733,23 @@ static void udf_scan_directory(FileReader& fr, uint32_t partBase, uint32_t dirLb
                     break;
                 }
             }
+            static const wchar_t* kLinuxSuffixes[] = {
+                L"/.disk/info", L"/.disk/cd_type", L"/.disk/base_installable",
+                L"/etc/os-release", L"/usr/lib/os-release",
+                L"/arch/version", L"/alpine.version",
+                L"/casper/vmlinuz", L"/casper/filesystem.squashfs",
+                L"/live/filesystem.squashfs", L"/live/vmlinuz"
+            };
+            for (const wchar_t* suf : kLinuxSuffixes) {
+                if (path_iequals_suffix(full, suf)) {
+                    for (const auto& w : res.linuxFiles) {
+                        if (ToLower(w.path) == ToLower(full)) goto skipLinux;
+                    }
+                    res.linuxFiles.push_back({ full, partBase + dataLba, fileSize });
+                    break;
+                }
+            }
+        skipLinux:;
             if (fileSize > 0) {
                 FileListItem item{ full, fileSize, false };
                 res.largestFiles.push_back(item);
@@ -2628,6 +2996,8 @@ static bool has_windows_install_evidence(const ScanResult& scan) {
         if (lp.find(L"/sources/ei.cfg") != std::wstring::npos) return true;
         if (lp.find(L"/setup.exe") != std::wstring::npos) return true;
         if (lp.find(L"bootmgr") != std::wstring::npos) return true;
+        if (lp.find(L"autounattend.xml") != std::wstring::npos || lp.find(L"unattend.xml") != std::wstring::npos) return true;
+        if (lp.find(L"/sources/appraiserres.dll") != std::wstring::npos) return true;
     }
     return false;
 }
@@ -2651,14 +3021,18 @@ static bool is_likely_microsoft_iso(const IsoSummary& sum, const ScanResult& sca
 static bool is_likely_linux_iso(const IsoSummary& sum, const ScanResult& scan) {
     if (!scan.linuxFiles.empty()) return true;
     std::wstring vol = ToLower(sum.volId + L" " + sum.sysId);
-    if (vol.find(L"ubuntu") != std::wstring::npos) return true;
-    if (vol.find(L"debian") != std::wstring::npos) return true;
-    if (vol.find(L"fedora") != std::wstring::npos) return true;
-    if (vol.find(L"linuxmint") != std::wstring::npos || vol.find(L"linux mint") != std::wstring::npos) return true;
-    if (vol.find(L"archlinux") != std::wstring::npos || vol.find(L"arch linux") != std::wstring::npos) return true;
-    if (vol.find(L"opensuse") != std::wstring::npos || vol.find(L"open suse") != std::wstring::npos) return true;
-    if (vol.find(L"centos") != std::wstring::npos) return true;
-    if (vol.find(L"clonezilla") != std::wstring::npos) return true;
+    static const wchar_t* kLinuxKeywords[] = {
+        L"ubuntu", L"debian", L"fedora", L"linuxmint", L"linux mint",
+        L"archlinux", L"arch linux", L"arch_", L"arch-", L"opensuse", L"open suse",
+        L"centos", L"clonezilla", L"alpine", L"manjaro", L"kali", L"tails",
+        L"proxmox", L"pve", L"truenas", L"freenas", L"rocky", L"almalinux",
+        L"void", L"nixos", L"openwrt", L"pop-os", L"pop_os", L"pop!_os",
+        L"elementary", L"zorin", L"gentoo", L"slackware", L"freebsd",
+        L"openbsd", L"netbsd", L"kaspersky", L"krd", L"drweb", L"gparted"
+    };
+    for (const wchar_t* kw : kLinuxKeywords) {
+        if (vol.find(kw) != std::wstring::npos) return true;
+    }
     return false;
 }
 
@@ -2683,10 +3057,40 @@ static void enrich_linux_from_vol_id(const std::wstring& volId, LinuxInfo& linux
     else if (low.find(L"fedora") != std::wstring::npos) set_distro(L"Fedora");
     else if (low.find(L"linuxmint") != std::wstring::npos || low.find(L"linux mint") != std::wstring::npos)
         set_distro(L"Linux Mint");
-    else if (low.find(L"archlinux") != std::wstring::npos) set_distro(L"Arch Linux");
-    else if (low.find(L"opensuse") != std::wstring::npos) set_distro(L"openSUSE");
+    else if (low.find(L"archlinux") != std::wstring::npos || low.find(L"arch ") != std::wstring::npos ||
+             low.find(L"arch_") != std::wstring::npos || low.find(L"arch-") != std::wstring::npos)
+        set_distro(L"Arch Linux");
+    else if (low.find(L"alpine") != std::wstring::npos) set_distro(L"Alpine Linux");
+    else if (low.find(L"manjaro") != std::wstring::npos) set_distro(L"Manjaro Linux");
+    else if (low.find(L"kali") != std::wstring::npos) set_distro(L"Kali Linux");
+    else if (low.find(L"tails") != std::wstring::npos) set_distro(L"Tails");
+    else if (low.find(L"proxmox") != std::wstring::npos || low.find(L"pve-") != std::wstring::npos)
+        set_distro(L"Proxmox VE");
+    else if (low.find(L"truenas") != std::wstring::npos || low.find(L"freenas") != std::wstring::npos)
+        set_distro(L"TrueNAS");
+    else if (low.find(L"rocky") != std::wstring::npos) set_distro(L"Rocky Linux");
+    else if (low.find(L"almalinux") != std::wstring::npos || low.find(L"alma") != std::wstring::npos)
+        set_distro(L"AlmaLinux");
+    else if (low.find(L"nixos") != std::wstring::npos) set_distro(L"NixOS");
+    else if (low.find(L"void") != std::wstring::npos) set_distro(L"Void Linux");
+    else if (low.find(L"openwrt") != std::wstring::npos) set_distro(L"OpenWrt");
+    else if (low.find(L"pop-os") != std::wstring::npos || low.find(L"pop_os") != std::wstring::npos || low.find(L"pop!_os") != std::wstring::npos)
+        set_distro(L"Pop!_OS");
+    else if (low.find(L"elementary") != std::wstring::npos) set_distro(L"elementary OS");
+    else if (low.find(L"zorin") != std::wstring::npos) set_distro(L"Zorin OS");
+    else if (low.find(L"opensuse") != std::wstring::npos || low.find(L"open suse") != std::wstring::npos)
+        set_distro(L"openSUSE");
     else if (low.find(L"centos") != std::wstring::npos) set_distro(L"CentOS");
     else if (low.find(L"clonezilla") != std::wstring::npos) set_distro(L"Clonezilla");
+    else if (low.find(L"gentoo") != std::wstring::npos) set_distro(L"Gentoo Linux");
+    else if (low.find(L"slackware") != std::wstring::npos) set_distro(L"Slackware");
+    else if (low.find(L"freebsd") != std::wstring::npos) set_distro(L"FreeBSD");
+    else if (low.find(L"openbsd") != std::wstring::npos) set_distro(L"OpenBSD");
+    else if (low.find(L"netbsd") != std::wstring::npos) set_distro(L"NetBSD");
+    else if (low.find(L"krd") != std::wstring::npos || low.find(L"kaspersky") != std::wstring::npos)
+        set_distro(L"Kaspersky Rescue Disk");
+    else if (low.find(L"drweb") != std::wstring::npos) set_distro(L"Dr.Web LiveDisk");
+    else if (low.find(L"gparted") != std::wstring::npos) set_distro(L"GParted Live");
     else return;
 
     linux.arch = linux_arch_from_text(v);
@@ -2737,10 +3141,13 @@ static void parse_dot_disk_info_text(const std::string& text, LinuxInfo& linux) 
 static void fast_scan_linux_paths(FileReader& fr, const IsoSummary& sum, ScanResult& scan) {
     static const wchar_t* kPaths[] = {
         L"/.disk/info", L"/.disk/cd_type", L"/.disk/base_installable",
+        L"/etc/os-release", L"/usr/lib/os-release",
+        L"/arch/version", L"/alpine.version",
         L"/casper/vmlinuz", L"/casper/filesystem.squashfs", L"/casper/filesystem.manifest",
         L"/casper/install/filesystem.manifest",
         L"/boot/grub/grub.cfg", L"/EFI/ubuntu/grubx64.efi",
-        L"/isolinux/isolinux.cfg", L"/live/filesystem.squashfs"
+        L"/isolinux/isolinux.cfg", L"/live/filesystem.squashfs",
+        L"/live/vmlinuz"
     };
 
     uint32_t rootLBA = sum.joliet ? sum.jolietRootLBA : sum.rootDirLBA;
@@ -2759,7 +3166,7 @@ static void fast_scan_linux_paths(FileReader& fr, const IsoSummary& sum, ScanRes
             scan.foundGRUB2 = true;
             scan.foundEFI = true;
         }
-        if (lp.find(L"/casper/") != std::wstring::npos) scan.foundEFI = true;
+        if (lp.find(L"/casper/") != std::wstring::npos || lp.find(L"/live/") != std::wstring::npos) scan.foundEFI = true;
     };
 
     if (rootLBA && rootSize) {
@@ -2786,12 +3193,21 @@ static void analyze_linux_media(FileReader& fr, const ScanResult& scan, const Is
     enrich_linux_from_vol_id(sum.volId, linux);
 
     const IsoFileRef* diskInfo = nullptr;
+    const IsoFileRef* osRelease = nullptr;
+    const IsoFileRef* archVersion = nullptr;
+    const IsoFileRef* alpineVersion = nullptr;
+
     for (const auto& f : scan.linuxFiles) {
         std::wstring lp = ToLower(f.path);
         if (lp.find(L"/.disk/info") != std::wstring::npos) diskInfo = &f;
-        else if (lp.find(L"/casper/vmlinuz") != std::wstring::npos) linux.kernelPath = f.path;
+        else if (lp.find(L"os-release") != std::wstring::npos) {
+            if (!osRelease || lp.find(L"/etc/") != std::wstring::npos) osRelease = &f;
+        }
+        else if (lp.find(L"/arch/version") != std::wstring::npos) archVersion = &f;
+        else if (lp.find(L"/alpine.version") != std::wstring::npos) alpineVersion = &f;
+        else if (lp.find(L"/casper/vmlinuz") != std::wstring::npos || lp.find(L"/live/vmlinuz") != std::wstring::npos) linux.kernelPath = f.path;
         else if (lp.find(L"filesystem.squashfs") != std::wstring::npos) linux.squashfsPath = f.path;
-        else if (lp.find(L"/casper/") != std::wstring::npos && linux.squashfsPath.empty())
+        else if ((lp.find(L"/casper/") != std::wstring::npos || lp.find(L"/live/") != std::wstring::npos) && linux.squashfsPath.empty())
             linux.squashfsPath = f.path;
     }
 
@@ -2804,10 +3220,51 @@ static void analyze_linux_media(FileReader& fr, const ScanResult& scan, const Is
         }
     }
 
+    if (osRelease && osRelease->size > 0) {
+        size_t n = (size_t)std::min<uint64_t>(osRelease->size, kMaxSmallTextFile);
+        std::vector<uint8_t> buf(n);
+        if (read_iso_file_bytes(fr, osRelease->lba, osRelease->size, 0, buf.data(), (DWORD)n)) {
+            std::string text((const char*)buf.data(), n);
+            parse_os_release_text(text, linux);
+        }
+    }
+
+    if (archVersion && archVersion->size > 0) {
+        size_t n = (size_t)std::min<uint64_t>(archVersion->size, 256);
+        std::vector<uint8_t> buf(n);
+        if (read_iso_file_bytes(fr, archVersion->lba, archVersion->size, 0, buf.data(), (DWORD)n)) {
+            std::string text((const char*)buf.data(), n);
+            while (!text.empty() && (text.back() == '\r' || text.back() == '\n' || text.back() == ' '))
+                text.pop_back();
+            linux.distro = L"Arch Linux";
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+            if (wlen > 1) {
+                linux.version.resize(wlen - 1);
+                MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &linux.version[0], wlen);
+            }
+        }
+    }
+
+    if (alpineVersion && alpineVersion->size > 0) {
+        size_t n = (size_t)std::min<uint64_t>(alpineVersion->size, 256);
+        std::vector<uint8_t> buf(n);
+        if (read_iso_file_bytes(fr, alpineVersion->lba, alpineVersion->size, 0, buf.data(), (DWORD)n)) {
+            std::string text((const char*)buf.data(), n);
+            while (!text.empty() && (text.back() == '\r' || text.back() == '\n' || text.back() == ' '))
+                text.pop_back();
+            linux.distro = L"Alpine Linux";
+            int wlen = MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, nullptr, 0);
+            if (wlen > 1) {
+                linux.version.resize(wlen - 1);
+                MultiByteToWideChar(CP_UTF8, 0, text.c_str(), -1, &linux.version[0], wlen);
+            }
+        }
+    }
+
     if (linux.distro.empty()) linux.distro = L"Linux";
     if (linux.arch.empty()) linux.arch = linux_arch_from_text(sum.volId);
     if (!linux.kernelPath.empty() || !linux.squashfsPath.empty()) {
-        linux.imageType = L"Live ISO (casper)";
+        linux.imageType = L"Live ISO";
         if (linux.flavor.empty()) linux.flavor = L"desktop (live)";
     }
     else if (linux.flavor == L"server")
@@ -2820,7 +3277,10 @@ static void fast_scan_targeted(FileReader& fr, const IsoSummary& sum, ScanResult
     static const wchar_t* kPaths[] = {
         L"/sources/install.esd", L"/sources/install.wim", L"/sources/boot.wim",
         L"/sources/ei.cfg", L"/setup.exe", L"/bootmgr", L"/bootmgr.efi",
-        L"/efi/boot/bootx64.efi", L"/efi/boot/bootia32.efi"
+        L"/efi/boot/bootx64.efi", L"/efi/boot/bootia32.efi",
+        L"/autounattend.xml", L"/unattend.xml",
+        L"/sources/autounattend.xml", L"/sources/unattend.xml",
+        L"/sources/appraiserres.dll"
     };
 
     uint32_t rootLBA = sum.joliet ? sum.jolietRootLBA : sum.rootDirLBA;
@@ -2839,7 +3299,11 @@ static void fast_scan_targeted(FileReader& fr, const IsoSummary& sum, ScanResult
         if (lp.find(L"bootx64.efi") != std::wstring::npos || lp.find(L"bootia32.efi") != std::wstring::npos)
             scan.foundGenericEFI = true;
         if (lp.find(L"/efi/") != std::wstring::npos) scan.foundEFI = true;
-        if (lp.find(L"ei.cfg") != std::wstring::npos) scan.configHits.push_back(ref.path);
+        if (lp.find(L"ei.cfg") != std::wstring::npos ||
+            lp.find(L"autounattend.xml") != std::wstring::npos ||
+            lp.find(L"unattend.xml") != std::wstring::npos) {
+            scan.configHits.push_back(ref.path);
+        }
     };
 
     if (rootLBA && rootSize) {
@@ -2871,6 +3335,8 @@ static void analyze_windows_media(FileReader& fr, const ScanResult& scan, Window
     const IsoFileRef* installEsd = nullptr;
     const IsoFileRef* bootWim = nullptr;
     const IsoFileRef* eiCfg = nullptr;
+    const IsoFileRef* autounattend = nullptr;
+    const IsoFileRef* appraiserres = nullptr;
 
     for (const auto& f : scan.winFiles) {
         std::wstring lp = ToLower(f.path);
@@ -2878,6 +3344,12 @@ static void analyze_windows_media(FileReader& fr, const ScanResult& scan, Window
         else if (lp.find(L"/sources/install.esd") != std::wstring::npos) installEsd = &f;
         else if (lp.find(L"/sources/boot.wim") != std::wstring::npos) bootWim = &f;
         else if (lp.find(L"/sources/ei.cfg") != std::wstring::npos) eiCfg = &f;
+        else if (lp.find(L"autounattend.xml") != std::wstring::npos || lp.find(L"unattend.xml") != std::wstring::npos) {
+            if (!autounattend) autounattend = &f;
+        }
+        else if (lp.find(L"/sources/appraiserres.dll") != std::wstring::npos) {
+            appraiserres = &f;
+        }
     }
 
     const IsoFileRef* primary = installWim ? installWim : installEsd;
@@ -2911,6 +3383,25 @@ static void analyze_windows_media(FileReader& fr, const ScanResult& scan, Window
         if (read_iso_file_bytes(fr, eiCfg->lba, eiCfg->size, 0, buf.data(), (DWORD)n)) {
             std::string text((const char*)buf.data(), n);
             parse_ei_cfg_text(text, win);
+        }
+    }
+
+    if (appraiserres) {
+        // In unmodified Windows media, appraiserres.dll is ~150KB - 5MB.
+        // Modified/stub/Rufus/Ventoy bypasses replace it with a 0-byte or < 64KB dummy file.
+        if (appraiserres->size < 64 * 1024) {
+            win.bypassHints.push_back(L"Заглушка appraiserres.dll (обход TPM / Secure Boot / CPU)");
+        }
+    }
+
+    if (autounattend && autounattend->size > 0) {
+        win.hasAutounattend = true;
+        win.autounattendPath = autounattend->path;
+        size_t n = (size_t)std::min<uint64_t>(autounattend->size, kMaxSmallTextFile);
+        std::vector<uint8_t> buf(n);
+        if (read_iso_file_bytes(fr, autounattend->lba, autounattend->size, 0, buf.data(), (DWORD)n)) {
+            std::wstring xml = text_bytes_to_wstring(buf.data(), n);
+            parse_unattend_xml(xml, win);
         }
     }
 
@@ -4012,8 +4503,11 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         txt << tr(L"Метка ISO", L"ISO label") << L"\t'" << sum.volId << L"'\r\n";
     if (linuxInfo.detected) {
         std::wstring detected = linuxInfo.distro;
-        if (!linuxInfo.version.empty()) detected += L" " + linuxInfo.version;
+        if (!linuxInfo.version.empty() && detected.find(linuxInfo.version) == std::wstring::npos)
+            detected += L" " + linuxInfo.version;
         txt << tr(L"Обнаружено", L"Detected") << L"\t" << detected << L"\r\n";
+        if (!linuxInfo.prettyName.empty() && linuxInfo.prettyName != detected && linuxInfo.prettyName != linuxInfo.distro)
+            txt << tr(L"Имя релиза", L"Release name") << L"\t" << linuxInfo.prettyName << L"\r\n";
         if (!linuxInfo.arch.empty())
             txt << tr(L"Архитектура", L"Architecture") << L"\t" << linuxInfo.arch << L"\r\n";
         if (sum.uefiBoot || !uefiBoots.empty()) txt << tr(L"Использует", L"Uses") << L"\tEFI ✅\r\n";
@@ -4025,6 +4519,18 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         txt << tr(L"Обнаружено", L"Detected") << L"\t" << windows_detected_title(winInfo) << L"\r\n";
         if (!winInfo.buildNumber.empty())
             txt << L"Build\t" << winInfo.buildNumber << L"\r\n";
+        if (winInfo.hasAutounattend)
+            txt << tr(L"Установка", L"Setup") << L"\t"
+                << tr(L"Автоматическая (Unattended / autounattend.xml) ⚙️", L"Automated (Unattended / autounattend.xml) ⚙️") << L"\r\n";
+        if (!winInfo.bypassHints.empty()) {
+            txt << tr(L"Модификации", L"Modifications") << L"\t"
+                << tr(L"Обход проверок Win11 (", L"Win11 checks bypass (");
+            for (size_t i = 0; i < winInfo.bypassHints.size(); ++i) {
+                txt << winInfo.bypassHints[i];
+                if (i + 1 < winInfo.bypassHints.size()) txt << L", ";
+            }
+            txt << L") ⚠️\r\n";
+        }
         if (sum.uefiBoot || !uefiBoots.empty()) txt << tr(L"Использует", L"Uses") << L"\tEFI ✅\r\n";
         if (sum.biosBoot || sum.foundWinBootMgr) txt << tr(L"Использует", L"Uses") << L"\tBootmgr (BIOS/UEFI) ✅\r\n";
         if (!wimVersion.empty()) {
@@ -4133,6 +4639,8 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
         txt << tr(L"Тип образа", L"Image type") << L"\t"
             << (linuxInfo.imageType.empty() ? L"Linux ISO" : linuxInfo.imageType) << L"\r\n";
         txt << tr(L"Дистрибутив", L"Distro") << L"\t" << linuxInfo.distro << L"\r\n";
+        if (!linuxInfo.prettyName.empty() && linuxInfo.prettyName != linuxInfo.distro)
+            txt << tr(L"Имя релиза", L"Release name") << L"\t" << linuxInfo.prettyName << L"\r\n";
         if (!linuxInfo.version.empty())
             txt << tr(L"Версия", L"Version") << L"\t" << linuxInfo.version << L"\r\n";
         if (!linuxInfo.flavor.empty())
@@ -4175,6 +4683,19 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
                 if (i + 1 < winInfo.eiCfgEditions.size()) txt << L", ";
             }
             txt << L"\r\n";
+        }
+        if (winInfo.hasAutounattend) {
+            txt << tr(L"Ответный файл", L"Answer file") << L"\t" << winInfo.autounattendPath << L" ✅\r\n";
+            for (const auto& tw : winInfo.unattendedTweaks) {
+                txt << L"  ⚙️ " << tw << L"\r\n";
+            }
+        }
+        if (!winInfo.bypassHints.empty()) {
+            txt << tr(L"Обход проверок Win11", L"Win11 checks bypass") << L"\t"
+                << winInfo.bypassHints.size() << L" " << tr(L"правил", L"rules") << L" ⚠️\r\n";
+            for (const auto& bp : winInfo.bypassHints) {
+                txt << L"  🔓 " << bp << L"\r\n";
+            }
         }
         // editions already listed at top — skip duplicate table
         if (winInfo.editions.empty() && (winInfo.isInstallMedia || winInfo.bootImageSize)) {
@@ -4479,7 +5000,7 @@ int wmain(int argc, wchar_t** argv) {
         return 1;
     }
     bool isIso = report.find(L"ISO 9660") != std::wstring::npos;
-    bool isDisk = report.find(L"Образ диска") != std::wstring::npos;
+    bool isDisk = report.find(L"Образ диска") != std::wstring::npos || report.find(L"Disk image") != std::wstring::npos;
     bool isDmg = report.find(L"Apple Disk Image") != std::wstring::npos;
     if (!isIso && !isDisk && !isDmg) {
         fwprintf(stderr, L"VERIFY FAIL: unknown report type\n");
@@ -4490,7 +5011,7 @@ int wmain(int argc, wchar_t** argv) {
         fwprintf(stderr, L"VERIFY FAIL: missing ISO summary markers\n");
         return 1;
     }
-    if (isDisk && report.find(L"Разметка диска") == std::wstring::npos) {
+    if (isDisk && report.find(L"Разметка диска") == std::wstring::npos && report.find(L"Disk layout") == std::wstring::npos) {
         fwprintf(stderr, L"VERIFY FAIL: missing disk layout section\n");
         return 1;
     }
