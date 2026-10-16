@@ -1,4 +1,4 @@
-﻿// IsoLister.cpp — WLX Lister plugin для Total Commander
+// IsoLister.cpp — WLX Lister plugin для Total Commander
 // Вывод таблиц "в стиле TC": колонки таб-стопами, без псевдографики.
 // Цветные эмодзи: RichEdit 5.0 + выбор шрифта Segoe UI Emoji для самих эмодзи.
 // Разбор ISO: PVD, SVD/Joliet, Rock Ridge, UDF, El Torito Boot Catalog,
@@ -408,18 +408,26 @@ static std::wstring FormatIsoDatetime17(const std::string& s17) {
     auto dig = [](char c) { return c >= '0' && c <= '9'; };
     for (size_t i = 0; i < 16; i++) if (!dig(s17[i])) return L"—";
 
-    int Y = stoi(s17.substr(0, 4));
-    int m = stoi(s17.substr(4, 2));
-    int d = stoi(s17.substr(6, 2));
-    int H = stoi(s17.substr(8, 2));
-    int M = stoi(s17.substr(10, 2));
-    int S = stoi(s17.substr(12, 2));
-    int cc = stoi(s17.substr(14, 2));
-    int8_t tz = (int8_t)(unsigned char)s17[16]; // шаг 15 минут
-    int tzMin = tz * 15;
+    auto parse2 = [&](size_t idx) -> int {
+        return (s17[idx] - '0') * 10 + (s17[idx + 1] - '0');
+    };
+    int Y = (s17[0] - '0') * 1000 + (s17[1] - '0') * 100 + (s17[2] - '0') * 10 + (s17[3] - '0');
+    int m = parse2(4);
+    int d = parse2(6);
+    int H = parse2(8);
+    int M = parse2(10);
+    int S = parse2(12);
+    int cc = parse2(14);
+    int8_t tz = (int8_t)(unsigned char)s17[16]; // шаг 15 минут от GMT (-48..+52)
+    int tzTotalMin = tz * 15;
+    wchar_t tzSign = (tzTotalMin < 0) ? L'-' : L'+';
+    int tzAbsMin = std::abs(tzTotalMin);
+    int tzH = tzAbsMin / 60;
+    int tzM = tzAbsMin % 60;
+
     wchar_t buf[128];
-    StringCchPrintfW(buf, 128, L"%04d-%02d-%02d %02d:%02d:%02d.%02d (UTC%+d:%02d)",
-        Y, m, d, H, M, S, cc, tzMin / 60, abs(tzMin % 60));
+    StringCchPrintfW(buf, 128, L"%04d-%02d-%02d %02d:%02d:%02d.%02d (UTC%c%02d:%02d)",
+        Y, m, d, H, M, S, cc, tzSign, tzH, tzM);
     return buf;
 }
 
@@ -658,15 +666,18 @@ static bool parse_gpt_partitions(FileReader& fr, DiskImageInfo& out) {
     uint32_t entryCount = rd_le32(hdr + 80);
     uint32_t entrySize = rd_le32(hdr + 84);
     if (!entryLBA || !entryCount || entrySize < 128 || entrySize > 4096) return false;
+    if (entryCount > 1024) entryCount = 1024;
 
-    std::vector<uint8_t> entries((size_t)entryCount * entrySize);
     uint64_t bytes = (uint64_t)entryCount * entrySize;
-    if (!fr.read_at((uint64_t)entryLBA * DISK_SECTOR_SIZE, entries.data(), (DWORD)std::min<uint64_t>(bytes, 2 * 1024 * 1024)))
+    DWORD toRead = (DWORD)std::min<uint64_t>(bytes, 2 * 1024 * 1024);
+    std::vector<uint8_t> entries(toRead);
+    if (!fr.read_at((uint64_t)entryLBA * DISK_SECTOR_SIZE, entries.data(), toRead))
         return false;
 
     out.gpt = true;
     int idx = 0;
-    for (uint32_t i = 0; i < entryCount; ++i) {
+    uint32_t maxEntries = toRead / entrySize;
+    for (uint32_t i = 0; i < maxEntries; ++i) {
         const uint8_t* e = entries.data() + (size_t)i * entrySize;
         bool empty = true;
         for (int b = 0; b < 16; ++b) if (e[b]) { empty = false; break; }
@@ -1326,27 +1337,62 @@ static bool udf_tag_valid(const uint8_t* tag) {
     return cs == tag[4];
 }
 
-static bool parse_udf_dstring(const uint8_t* p, int maxChars, std::wstring& out) {
-    if (!p) return false;
-    uint8_t len = p[0];
-    if (len < 2 || len > 255) return false;
-    uint8_t comp = p[1];
+static bool parse_udf_dstring(const uint8_t* p, int fieldSize, std::wstring& out) {
     out.clear();
-    if (comp == 8) {
-        int avail = (int)len - 1;
-        for (int i = 0; i + 1 < avail && (int)out.size() < maxChars; i += 2) {
-            wchar_t ch = (wchar_t)((p[2 + i] << 8) | p[2 + i + 1]);
-            if (ch) out.push_back(ch);
+    if (!p || fieldSize < 2) return false;
+
+    // In ECMA-167 dstring<N>, length byte is stored at p[fieldSize - 1].
+    // Under UDF CS0, byte 0 is the Compression ID:
+    //   0x08 = 8-bit (Latin-1 / ASCII)
+    //   0x10 = 16-bit Big-Endian (UCS-2 BE)
+    // The length in p[fieldSize - 1] includes the 1-byte Compression ID.
+    uint8_t len = p[fieldSize - 1];
+    uint8_t comp = p[0];
+
+    // Standard UDF CS0 with length byte at p[fieldSize - 1]
+    if (len >= 1 && len <= fieldSize - 1 && (comp == 8 || comp == 16)) {
+        if (comp == 8) {
+            for (int i = 1; i < len; ++i) {
+                if (p[i]) out.push_back((wchar_t)p[i]);
+            }
         }
-        return !out.empty();
-    }
-    if (comp == 16) {
-        for (int i = 2; i < len && (int)out.size() < maxChars; i++) {
-            if (p[i]) out.push_back((wchar_t)p[i]);
+        else { // comp == 16 (0x10)
+            for (int i = 1; i + 1 < len; i += 2) {
+                wchar_t ch = (wchar_t)((p[i] << 8) | p[i + 1]);
+                if (ch) out.push_back(ch);
+            }
         }
-        return !out.empty();
+        while (!out.empty() && (out.back() == L' ' || out.back() == L'\0')) out.pop_back();
+        if (!out.empty()) return true;
     }
-    return false;
+
+    // Heuristic fallback if length byte was 0 or field was written without trailing length:
+    if (comp == 8 || comp == 16) {
+        if (comp == 8) {
+            for (int i = 1; i < fieldSize - 1; ++i) {
+                if (!p[i]) break;
+                out.push_back((wchar_t)p[i]);
+            }
+        }
+        else {
+            for (int i = 1; i + 1 < fieldSize - 1; i += 2) {
+                wchar_t ch = (wchar_t)((p[i] << 8) | p[i + 1]);
+                if (!ch) break;
+                out.push_back(ch);
+            }
+        }
+        while (!out.empty() && (out.back() == L' ' || out.back() == L'\0')) out.pop_back();
+        if (!out.empty()) return true;
+    }
+
+    // Fallback: plain ASCII / Latin-1
+    std::string s;
+    for (int i = 0; i < fieldSize - 1; ++i) {
+        if (!p[i]) break;
+        if (p[i] >= 0x20 && p[i] < 0x7F) s.push_back((char)p[i]);
+    }
+    out = ATrimRight(s);
+    return !out.empty();
 }
 
 static int detect_udf_nsr(FileReader& fr) {
@@ -1401,9 +1447,10 @@ static bool parse_udf(FileReader& fr, IsoSummary& out) {
         size_t descLen = ((size_t)crcLen + 3) & ~size_t(3);
         if (descLen < 16 || pos + descLen > seq.size()) break;
 
-        if (tid == 1 && crcLen >= 116) {
+        if (tid == 1 && crcLen >= 56) {
             parse_udf_dstring(t + 24, 32, out.udfPrimaryVolumeId);
-            parse_udf_dstring(t + 84, 32, out.udfVolumeSetId);
+            if (crcLen >= 212)
+                parse_udf_dstring(t + 84, 128, out.udfVolumeSetId);
         }
         else if (tid == 6 && crcLen >= 212) {
             parse_udf_dstring(t + 84, 128, out.udfLogicalVolumeId);
@@ -1675,17 +1722,46 @@ static void parse_wim_xml_images(const std::wstring& xml, std::vector<WimImageIn
 }
 
 static bool wim_bytes_to_xml(const uint8_t* data, size_t len, std::wstring& xmlOut) {
-    if (len < 4) return false;
+    if (!data || len < 4) return false;
+
+    // 1. UTF-16LE with BOM (0xFF, 0xFE)
     if (data[0] == 0xFF && data[1] == 0xFE) {
         size_t chars = (len - 2) / 2;
         xmlOut.assign(chars, L'\0');
         memcpy(&xmlOut[0], data + 2, chars * sizeof(wchar_t));
         return xmlOut.find(L"<IMAGE ") != std::wstring::npos || xmlOut.find(L"<WIM") != std::wstring::npos;
     }
-    if (data[0] == '<' && data[1] == '?') {
-        xmlOut.assign((const wchar_t*)data, len / sizeof(wchar_t));
-        return true;
+
+    // 2. UTF-8 with BOM (0xEF, 0xBB, 0xBF)
+    if (len >= 7 && data[0] == 0xEF && data[1] == 0xBB && data[2] == 0xBF) {
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, (const char*)data + 3, (int)(len - 3), nullptr, 0);
+        if (wlen > 0) {
+            xmlOut.assign((size_t)wlen, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, (const char*)data + 3, (int)(len - 3), &xmlOut[0], wlen);
+            return xmlOut.find(L"<IMAGE ") != std::wstring::npos || xmlOut.find(L"<WIM") != std::wstring::npos;
+        }
     }
+
+    // 3. UTF-16LE without BOM: '<' in wchar_t is 0x3C, 0x00
+    if (data[1] == 0 && (data[0] == '<' || data[0] == ' ')) {
+        size_t chars = len / 2;
+        xmlOut.assign(chars, L'\0');
+        memcpy(&xmlOut[0], data, chars * sizeof(wchar_t));
+        return xmlOut.find(L"<IMAGE ") != std::wstring::npos || xmlOut.find(L"<WIM") != std::wstring::npos;
+    }
+
+    // 4. UTF-8 / ASCII without BOM (e.g. starts with "<?xml" or "<WIM>")
+    if (data[0] == '<') {
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, (const char*)data, (int)len, nullptr, 0);
+        if (wlen > 0) {
+            xmlOut.assign((size_t)wlen, L'\0');
+            MultiByteToWideChar(CP_UTF8, 0, (const char*)data, (int)len, &xmlOut[0], wlen);
+            if (xmlOut.find(L"<IMAGE ") != std::wstring::npos || xmlOut.find(L"<WIM") != std::wstring::npos)
+                return true;
+        }
+    }
+
+    // 5. Fallback assumption: UTF-16LE
     size_t chars = len / 2;
     xmlOut.assign(chars, L'\0');
     memcpy(&xmlOut[0], data, chars * sizeof(wchar_t));
@@ -1961,7 +2037,7 @@ static bool wim_header_looks_valid(const uint8_t* hdr) {
     if (memcmp(hdr, "MSWIM", 5) != 0) return false;
     if (rd_le32(hdr + 8) != 208) return false;
     uint32_t imgCount = rd_le32(hdr + WIM_OFF_IMAGE_COUNT);
-    if (imgCount == 0 || imgCount > 40) return false;
+    if (imgCount == 0 || imgCount > 1024) return false;
     uint64_t xmlOff = rd_le64(hdr + 80);
     uint64_t xmlLen = rd_le64(hdr + 88);
     if (xmlLen < 64 || xmlLen > 32 * 1024 * 1024) return false;
@@ -2481,17 +2557,51 @@ struct UefiBootInfo {
 };
 
 static bool scan_pe_cert_string(FileReader& fr, uint32_t lba, uint32_t size, const char* needle, std::wstring& signerOut) {
-    const DWORD SCAN = (DWORD)std::min<uint32_t>(size, 256 * 1024);
-    std::vector<uint8_t> buf(SCAN);
-    if (!read_iso_file_bytes(fr, lba, size, 0, buf.data(), SCAN)) return false;
+    if (size < 512 || !needle || !needle[0]) return false;
+
+    // First try: parse PE header to find the Security Directory (Authenticode certs)
+    uint64_t certOff = 0;
+    DWORD certLen = 0;
+    uint8_t peHdr[1024]{};
+    DWORD hdrToRead = (DWORD)std::min<uint32_t>(size, (uint32_t)sizeof(peHdr));
+    if (read_iso_file_bytes(fr, lba, size, 0, peHdr, hdrToRead)) {
+        if (peHdr[0] == 'M' && peHdr[1] == 'Z') {
+            uint32_t e_lfanew = rd_le32(peHdr + 0x3C);
+            if (e_lfanew + 256 <= hdrToRead && !memcmp(peHdr + e_lfanew, "PE\0\0", 4)) {
+                uint16_t magic = rd_le16(peHdr + e_lfanew + 24);
+                uint32_t dirOff = 0;
+                if (magic == 0x010B) { // PE32
+                    dirOff = e_lfanew + 24 + 96;
+                }
+                else if (magic == 0x020B) { // PE32+ (x64 / arm64)
+                    dirOff = e_lfanew + 24 + 112;
+                }
+                if (dirOff && dirOff + 5 * 8 <= hdrToRead) {
+                    uint32_t secRva = rd_le32(peHdr + dirOff + 4 * 8); // IMAGE_DIRECTORY_ENTRY_SECURITY (file offset)
+                    uint32_t secSize = rd_le32(peHdr + dirOff + 4 * 8 + 4);
+                    if (secRva > 0 && secRva < size && secSize > 0) {
+                        certOff = secRva;
+                        certLen = (DWORD)std::min<uint64_t>(secSize, 256 * 1024);
+                    }
+                }
+            }
+        }
+    }
+
+    // Read cert region if found, otherwise fall back to scanning first 256 KB
+    DWORD scanLen = certLen ? certLen : (DWORD)std::min<uint32_t>(size, 256 * 1024);
+    uint64_t scanOff = certLen ? certOff : 0;
+    std::vector<uint8_t> buf(scanLen);
+    if (!read_iso_file_bytes(fr, lba, size, scanOff, buf.data(), scanLen)) return false;
+
     const char* p = (const char*)buf.data();
     size_t nlen = strlen(needle);
-    for (size_t i = 0; i + nlen < SCAN; ++i) {
+    for (size_t i = 0; i + nlen < scanLen; ++i) {
         if (memcmp(p + i, needle, nlen) != 0) continue;
         size_t start = i;
-        while (start > 0 && p[start - 1] >= 0x20) start--;
+        while (start > 0 && p[start - 1] >= 0x20 && p[start - 1] < 0x7F) start--;
         size_t end = i + nlen;
-        while (end < SCAN && p[end] >= 0x20 && p[end] < 0x7F) end++;
+        while (end < scanLen && p[end] >= 0x20 && p[end] < 0x7F) end++;
         std::string s(p + start, end - start);
         int wlen = MultiByteToWideChar(CP_ACP, 0, s.c_str(), -1, nullptr, 0);
         if (wlen <= 0) return true;
@@ -3191,6 +3301,10 @@ static bool is_section_label(const std::wstring& raw) {
 }
 
 static void RichColorizeReport(HWND hRE) {
+    SendMessageW(hRE, WM_SETREDRAW, FALSE, 0);
+    LRESULT eventMask = SendMessageW(hRE, EM_GETEVENTMASK, 0, 0);
+    SendMessageW(hRE, EM_SETEVENTMASK, 0, eventMask & ~ENM_SELCHANGE);
+
     const int nlines = (int)SendMessageW(hRE, EM_GETLINECOUNT, 0, 0);
     for (int li = 0; li < nlines; ++li) {
         const LONG cpLine = (LONG)SendMessageW(hRE, EM_LINEINDEX, (WPARAM)li, 0);
@@ -3280,6 +3394,9 @@ static void RichColorizeReport(HWND hRE) {
 
     CHARRANGE crNone{ -1, -1 };
     SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&crNone);
+    SendMessageW(hRE, EM_SETEVENTMASK, 0, eventMask);
+    SendMessageW(hRE, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(hRE, nullptr, TRUE);
 }
 
 
@@ -4262,8 +4379,9 @@ extern "C" int __stdcall ListSendCommand(HWND ListWin, int Command, int Paramete
     case lc_newparams: {
         wchar_t wincmd[MAX_PATH]{};
         resolve_wincmd_ini(wincmd, MAX_PATH);
-        recompute_theme(wincmd[0] ? wincmd : nullptr);
+        recompute_theme(wincmd[0] ? wincmd : nullptr, GetParent(ListWin));
         RichSetDefaultCharFormat(ListWin);
+        RichColorizeReport(ListWin);
         InvalidateRect(ListWin, nullptr, TRUE);
         return LISTPLUGIN_OK;
     }
@@ -4284,13 +4402,20 @@ extern "C" int __stdcall ListSearchTextW(HWND ListWin, WCHAR* SearchString, int 
 
     FINDTEXTEXW ft{};
     ft.lpstrText = SearchString;
+    bool backwards = (SearchParameter & lcs_backwards) != 0;
     if (SearchParameter & lcs_findfirst) {
-        ft.chrg.cpMin = 0;
-        ft.chrg.cpMax = -1;
+        if (backwards) {
+            ft.chrg.cpMin = -1;
+            ft.chrg.cpMax = 0;
+        }
+        else {
+            ft.chrg.cpMin = 0;
+            ft.chrg.cpMax = -1;
+        }
     }
-    else if (SearchParameter & lcs_backwards) {
-        ft.chrg.cpMin = 0;
-        ft.chrg.cpMax = sel.cpMin;
+    else if (backwards) {
+        ft.chrg.cpMin = sel.cpMin;
+        ft.chrg.cpMax = 0;
     }
     else {
         ft.chrg.cpMin = sel.cpMax;
@@ -4298,7 +4423,7 @@ extern "C" int __stdcall ListSearchTextW(HWND ListWin, WCHAR* SearchString, int 
     }
 
     DWORD flags = 0;
-    if (!(SearchParameter & lcs_backwards)) flags |= FR_DOWN;
+    if (!backwards) flags |= FR_DOWN;
     if (SearchParameter & lcs_matchcase) flags |= FR_MATCHCASE;
     if (SearchParameter & lcs_wholewords) flags |= FR_WHOLEWORD;
 
