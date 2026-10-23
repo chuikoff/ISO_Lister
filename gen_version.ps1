@@ -43,6 +43,20 @@ elseif ($describe) {
     $versionStr = "0.1.0.$build"
 }
 
+# VERSION (X.Y.Z) — версия готовящегося релиза. Пока тег vX.Y.Z не поставлен,
+# сборки получают X.Y.Z.0 (а не номер предыдущего тега + коммиты).
+$verFile = Join-Path $PSScriptRoot "VERSION"
+if (Test-Path $verFile) {
+    $base = (Get-Content -Raw $verFile).Trim()
+    if ($base -match "^(\d+)\.(\d+)\.(\d+)$") {
+        $bMaj = [int]$matches[1]; $bMin = [int]$matches[2]; $bPat = [int]$matches[3]
+        if ([version]"$bMaj.$bMin.$bPat" -gt [version]"$major.$minor.$patch") {
+            $major = $bMaj; $minor = $bMin; $patch = $bPat; $build = 0
+            $versionStr = "$major.$minor.$patch.$build"
+        }
+    }
+}
+
 $gitShaStr = $sha
 if ($dirty -eq 1 -and $sha -ne "unknown") { $gitShaStr = "$sha-dirty" }
 $ts = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")

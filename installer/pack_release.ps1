@@ -3,9 +3,16 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 
 function Get-PluginVersion {
-    $tag = (git -C $Root describe --tags --abbrev=0 2>$null).Trim()
-    if ($tag -match '^v(.+)$') { return $Matches[1] }
-    return "0.0.0"
+    # VERSION wins when it is newer than the last tag (release being prepared)
+    $tagVer = "0.0.0"
+    $tag = (git -C $Root describe --tags --abbrev=0 2>$null)
+    if ($tag -and $tag.Trim() -match '^v(\d+\.\d+\.\d+)$') { $tagVer = $Matches[1] }
+    $verFile = Join-Path $Root "VERSION"
+    if (Test-Path $verFile) {
+        $base = (Get-Content -Raw $verFile).Trim()
+        if ($base -match '^\d+\.\d+\.\d+$' -and [version]$base -gt [version]$tagVer) { return $base }
+    }
+    return $tagVer
 }
 
 function Write-Inf1251($src, $dst) {

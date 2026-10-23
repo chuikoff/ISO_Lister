@@ -21,3 +21,5 @@ version_auto.h
 IsoLister.log
 test/out/
 dist/
+build/
+dist_box/

@@ -100,6 +100,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <ModuleDefinitionFile>IsoLister.wlx.def</ModuleDefinitionFile>
+      <AdditionalDependencies>gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File "$(ProjectDir)\gen_version.ps1"
@@ -126,6 +127,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <ModuleDefinitionFile>IsoLister.wlx.def</ModuleDefinitionFile>
+      <AdditionalDependencies>gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File "$(ProjectDir)\gen_version.ps1"
@@ -150,6 +152,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <ModuleDefinitionFile>IsoLister.def</ModuleDefinitionFile>
+      <AdditionalDependencies>gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File "$(ProjectDir)\gen_version.ps1"
@@ -176,6 +179,7 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
       <EnableUAC>false</EnableUAC>
       <ModuleDefinitionFile>IsoLister.def</ModuleDefinitionFile>
+      <AdditionalDependencies>gdiplus.lib;%(AdditionalDependencies)</AdditionalDependencies>
     </Link>
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File "$(ProjectDir)\gen_version.ps1"
@@ -184,17 +188,26 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <ClInclude Include="framework.h" />
+    <ClInclude Include="IsoAnalysis.h" />
+    <ClInclude Include="IsoModel.h" />
+    <ClInclude Include="IsoView.h" />
+    <ClInclude Include="listplug.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="resource.h" />
     <ClInclude Include="version_auto.h" />
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="IsoLister.cpp" />
+    <ClCompile Include="IsoModel.cpp" />
+    <ClCompile Include="IsoPlugin.cpp" />
+    <ClCompile Include="IsoView.cpp" />
   </ItemGroup>
   <ItemGroup>
     <None Include="gen_version.ps1" />
     <None Include="IsoLister.def" />
     <None Include="IsoLister.wlx.def" />
+    <None Include="Makefile" />
+    <None Include="VERSION" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="IsoLister.rc" />

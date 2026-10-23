@@ -10,6 +10,20 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 
 **IsoLister** — плагин просмотра (Lister) для Total Commander. Анализирует образы дисков **без монтирования**: показывает тип ФС, загрузочность, редакции Windows, дистрибутив Linux, разметку raw-образов и структуру Apple DMG. Работает в полном Lister (**F3**) и в быстром просмотре (**Ctrl+Q**).
 
+### Внешний вид (v1.2.0)
+
+| Windows ISO | Linux ISO |
+|---|---|
+| ![Windows ISO](docs/windows.png) | ![Linux ISO](docs/linux.png) |
+| **Тёмная тема** | **Узкое окно** |
+| ![Тёмная тема](docs/dark.png) | ![Узкое окно](docs/narrow.png) |
+
+- **Шапка** в цвете системы (Windows — синий, Ubuntu — оранжевый, Debian — красный, Alpine — тёмно-синий…, остальные — цвет по метке): название ОС/редакции или метка тома, строка «формат · размер · ФС · загрузочный», плашка с ключевым фактом (x64 · BIOS + UEFI).
+- **Шесть плиток**: ОС, сборка/версия, архитектура, загрузка (BIOS/UEFI, предупреждение Secure Boot), размер, редакции/обходы Win11 (для raw-образов — разметка, разделы, ФС, неразмечено).
+- **Секции в две колонки** (одна — уже 700 px), таблицы (редакции WIM, крупнейшие файлы, список файлов, Boot Catalog) — на всю ширину. Статусы ✅/❌/⚠️ — цветные точки.
+- **Ctrl+A / Ctrl+C** копируют тот же текстовый отчёт, что и раньше; клик/Shift/протяжка выделяют строки, ПКМ — «Копировать значение/строку/всё».
+- Поиск TC (**F7**) подсвечивает совпадение и прокручивает к нему; плитки перестраиваются 6 → 3 → 2; учитывается DPI монитора.
+
 ### Поддерживаемые форматы
 
 | Расширение | Тип | Что определяется |
@@ -40,7 +54,7 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 
 ### Установка
 
-1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.14.zip`.
+1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.2.0.zip`.
 2. Откройте архив в Total Commander — появится диалог автоустановки (`pluginst.inf`).
 3. Путь по умолчанию: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Полностью перезапустите Total Commander.**
@@ -94,10 +108,9 @@ EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | 
 
 Язык UI: если в `wincmd.ini` `LanguageIni`/`LanguageDll` содержит **RUS** — русский отчёт; иначе **английский**.
 
-Тёмная тема: по **`[Configuration] DarkMode`** (переключатель TC `cm_SwitchDarkMode`), **не** по теме Windows.  
-Опционально `[IsoLister] Dark=0|1|2` — light / dark / auto (по умолчанию `2` = как TC).
+Тёмная тема (по порядку): `[IsoLister] Theme=auto|light|dark` → прежний `Dark=0|1` (`2` = авто) → флаг тёмного режима, который передаёт TC 11+ → для старых TC прежняя эвристика (`[Configuration] DarkMode`, `[Lister] BgColor`, яркость окна Lister). Тема Windows **не** используется — у TC свой переключатель `cm_SwitchDarkMode`.
 
-Отчёт: единый акцентный стиль (светлая/тёмная палитра) — цветные заголовки секций, ✅/❌, линии-разделители; бренд-строка `IsoLister` + версия. Тема по фону Lister / DarkMode.
+Вид (v1.2.0): owner-drawn окно в стиле APK Lister — шапка, плитки, секции; данные те же, что в текстовом отчёте, копирование отдаёт отчёт без изменений.
 
 Поиск в Lister: **Ctrl+F** / F7 (ListSearchText).
 
@@ -109,9 +122,16 @@ Dark=2
 ShowFileList=0
 ShowBootEntries=0
 DebugLog=0
+; Theme=auto|light|dark (v1.2.0+, приоритетнее Dark)
 ```
 
 ### Сборка из исходников
+
+Код: `IsoLister.cpp` — анализ и текстовый отчёт; `IsoModel.cpp` — разбор отчёта для вида; `IsoView.cpp` — отрисовка; `IsoPlugin.cpp` — WLX-экспорты.
+
+Версия: `gen_version.ps1` / `tools/gen_version.sh` пишут `version_auto.h` из `git describe` (тег `vX.Y.Z` + коммиты). Файл `VERSION` задаёт готовящийся релиз: пока он новее последнего тега, сборка получает `X.Y.Z.0`.
+
+MinGW (Linux/WSL, кросс-компиляция): `make` → `build/IsoLister.wlx`, `build/IsoLister.wlx64`, `build/IsoListerTest.exe`, тест-хост; `make test FIXTURES=папка` — отчёты по образам под Wine; `make dist` → `dist_box/ISO_Lister_vX.Y.Z.zip`.
 
 Visual Studio 2022, компонент «Разработка классических приложений на C++».
 
@@ -133,6 +153,16 @@ MIT — см. [LICENSE](LICENSE).
 ### Overview
 
 **IsoLister** is a Total Commander Lister (WLX) plugin. It inspects disk images **without mounting**: filesystem type, boot capability, Windows editions, Linux distro metadata, raw partition layout, and Apple DMG structure. Works in full Lister (**F3**) and Quick View (**Ctrl+Q**).
+
+### Look (v1.2.0)
+
+Screenshots: see the Russian section above (`docs/windows.png`, `docs/linux.png`, `docs/dark.png`, `docs/narrow.png`).
+
+- **Hero band** in the system's colour (Windows blue, Ubuntu orange, Debian red, Alpine dark blue…, otherwise a colour derived from the label): OS/edition or volume label, "format · size · FS · bootable" line, and a pill with the key fact (x64 · BIOS + UEFI).
+- **Six tiles**: OS, build/version, architecture, boot (BIOS/UEFI, Secure Boot warning), size, editions/Win11 bypasses (raw disk images: layout, partitions, file systems, unallocated).
+- **Two-column sections** (one column below 700 px); tables (WIM editions, largest files, file list, Boot Catalog) span the full width. ✅/❌/⚠️ become coloured dots.
+- **Ctrl+A / Ctrl+C** copy the same plain-text report as before; click/Shift/drag select rows, right-click offers copy value/line/all.
+- TC search (**F7**) highlights and scrolls to the match; tiles reflow 6 → 3 → 2; per-monitor DPI aware.
 
 ### Supported formats
 
@@ -164,7 +194,7 @@ MIT — см. [LICENSE](LICENSE).
 
 ### Installation
 
-1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.1.14.zip`.
+1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.2.0.zip`.
 2. Open the ZIP in Total Commander — auto-install dialog appears (`pluginst.inf`).
 3. Default path: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Restart Total Commander completely.**
@@ -218,10 +248,9 @@ Section `[IsoLister]` in `%APPDATA%\GHISLER\lsplugin.ini` (or `wincmd.ini`):
 
 UI language: if `wincmd.ini` `LanguageIni`/`LanguageDll` contains **RUS** → Russian report; otherwise **English**.
 
-Dark theme: follows **`[Configuration] DarkMode`** (TC `cm_SwitchDarkMode`), **not** Windows theme.  
-Optional `[IsoLister] Dark=0|1|2` — light / dark / auto (default `2` = TC).
+Dark theme (in order): `[IsoLister] Theme=auto|light|dark` → legacy `Dark=0|1` (`2` = auto) → the dark-mode flag TC 11+ passes to the plugin → for older TC the previous heuristic (`[Configuration] DarkMode`, `[Lister] BgColor`, Lister window brightness). The Windows theme is **not** used — TC has its own `cm_SwitchDarkMode`.
 
-Report: unified accent colors for light/dark — section headers, ✅/❌, separator rules; brand line `IsoLister` + version. Theme follows Lister background / DarkMode.
+View (v1.2.0): owner-drawn window in the APK Lister style — hero, tiles, sections; the data is exactly the text report, and copying returns that report unchanged.
 
 Search in Lister: **Ctrl+F** / F7 (`ListSearchText`).
 
@@ -233,9 +262,16 @@ Dark=2
 ShowFileList=0
 ShowBootEntries=0
 DebugLog=0
+; Theme=auto|light|dark (v1.2.0+, overrides Dark)
 ```
 
 ### Build from source
+
+Code: `IsoLister.cpp` — analysis and the text report; `IsoModel.cpp` — parses the report for the view; `IsoView.cpp` — drawing; `IsoPlugin.cpp` — WLX exports.
+
+Version: `gen_version.ps1` / `tools/gen_version.sh` write `version_auto.h` from `git describe` (tag `vX.Y.Z` + commits). The `VERSION` file names the release being prepared: while it is newer than the last tag, builds are `X.Y.Z.0`.
+
+MinGW (Linux/WSL cross-compile): `make` → `build/IsoLister.wlx`, `build/IsoLister.wlx64`, `build/IsoListerTest.exe`, test host; `make test FIXTURES=dir` — reports for images under Wine; `make dist` → `dist_box/ISO_Lister_vX.Y.Z.zip`.
 
 Visual Studio 2022 with «Desktop development with C++».
 

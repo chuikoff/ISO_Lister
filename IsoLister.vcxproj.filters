@@ -27,9 +27,30 @@
     <ClInclude Include="version_auto.h">
       <Filter>Header Files</Filter>
     </ClInclude>
+    <ClInclude Include="IsoAnalysis.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="IsoModel.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="IsoView.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="listplug.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="IsoLister.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="IsoModel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="IsoPlugin.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="IsoView.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -38,6 +59,11 @@
       <Filter>Source Files</Filter>
     </None>
     <None Include="gen_version.ps1" />
+    <None Include="IsoLister.wlx.def">
+      <Filter>Source Files</Filter>
+    </None>
+    <None Include="Makefile" />
+    <None Include="VERSION" />
   </ItemGroup>
   <ItemGroup>
     <ResourceCompile Include="IsoLister.rc">

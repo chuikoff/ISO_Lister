@@ -1,6 +1,6 @@
-// IsoLister.cpp — WLX Lister plugin для Total Commander
-// Вывод таблиц "в стиле TC": колонки таб-стопами, без псевдографики.
-// Цветные эмодзи: RichEdit 5.0 + выбор шрифта Segoe UI Emoji для самих эмодзи.
+// IsoLister.cpp — анализ образов для WLX Lister plugin Total Commander.
+// Здесь только разбор и текстовый отчёт (key<TAB>value, эмодзи-маркеры).
+// Отрисовка (дизайн C, owner-drawn) — IsoView.cpp; WLX-экспорты — IsoPlugin.cpp.
 // Разбор ISO: PVD, SVD/Joliet, Rock Ridge, UDF, El Torito Boot Catalog,
 // эвристики загрузчиков (GRUB2/legacy, ISOLINUX/SYSLINUX, systemd-boot, Win BootMgr).
 //
@@ -10,21 +10,7 @@
 #define NOMINMAX
 #endif
 #include <windows.h>
-#include <windowsx.h>
-#include <commdlg.h>
 #include <strsafe.h>
-#ifndef FR_DOWN
-#define FR_DOWN 0x00000001
-#endif
-#ifndef FR_WHOLEWORD
-#define FR_WHOLEWORD 0x00000002
-#endif
-#ifndef FR_MATCHCASE
-#define FR_MATCHCASE 0x00000004
-#endif
-#ifndef EM_FINDTEXTEXW
-#define EM_FINDTEXTEXW (WM_USER + 124)
-#endif
 #include <string>
 #include <sstream>
 #include <vector>
@@ -36,44 +22,18 @@
 #include <cstring>   // memcmp
 #include <set>
 
-// RichEdit
-#include <Richedit.h>
-#include <Richole.h>
-#ifndef MSFTEDIT_CLASS
-#define MSFTEDIT_CLASS L"RICHEDIT50W"
-#endif
-
 extern "C" {
 #include "listplug.h"
 }
 #include "version_auto.h"  // генерируется gen_version.ps1
 
-#pragma comment(linker, "/EXPORT:ListLoad")
-#pragma comment(linker, "/EXPORT:ListLoadW")
-#pragma comment(linker, "/EXPORT:ListGetDetectString")
-#pragma comment(linker, "/EXPORT:ListCloseWindow")
-#pragma comment(linker, "/EXPORT:ListSetDefaultParams")
-#pragma comment(linker, "/EXPORT:ListSendCommand")
-#pragma comment(linker, "/EXPORT:ListSearchText")
-#pragma comment(linker, "/EXPORT:ListSearchTextW")
+#include "IsoAnalysis.h"
 
 // -----------------------------------------------------------------------------
 // Глобальные настройки/состояние
 // -----------------------------------------------------------------------------
-static HINSTANCE g_hInst = nullptr;
-static HFONT     g_hMonoFont = nullptr;       // Consolas/Courier New
-static HMODULE   g_hMsftEdit = nullptr;       // Msftedit.dll для RICHEDIT50W
 static std::wstring g_iniPath;
-static std::unordered_map<HWND, WNDPROC> g_richWndProcMap;
-static const UINT IDM_CTX_COPY = 1;
-static const UINT IDM_CTX_SELECTALL = 2;
 
-static POINT RichEditContextPoint(HWND hwnd);
-static LRESULT CALLBACK RichEditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-static void SubclassRichEdit(HWND hwnd);
-static void UnsubclassRichEdit(HWND hwnd);
-static void FitWindowToParentClient(HWND child, HWND parent);
-static HWND CreateRichEditView(HWND parent, DWORD style);
 static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact = false);
 
 static const UINT DEFAULT_SECTOR_SIZE = 2048;
@@ -263,26 +223,6 @@ static void recompute_theme(const wchar_t* wincmdPath, HWND parentHint = nullptr
         g_darkMode ? 1 : 0, g_optDark, listerBg, parentLuma,
         (unsigned)(g_fgColor & 0xFFFFFF), (unsigned)(g_bgColor & 0xFFFFFF));
 }
-
-// Таб‑позиции (в "знаках", конвертируем в twips по шрифту)
-static const int TAB_MAIN_1 = 26;   // поле → значение
-// Для Boot Catalog (многоколонная таблица)
-static const int TAB_BOOT_0 = 4;    // №
-static const int TAB_BOOT_1 = 20;   // Платформа
-static const int TAB_BOOT_2 = 31;   // Bootable
-static const int TAB_BOOT_3 = 50;   // Media
-static const int TAB_BOOT_4 = 62;   // Segment
-static const int TAB_BOOT_5 = 72;   // SysType
-static const int TAB_BOOT_6 = 84;   // Sectors
-static const int TAB_BOOT_7 = 98;   // LBA
-// Для списка файлов
-static const int TAB_FILE_PATH = 4;
-static const int TAB_FILE_SIZE = 58;
-static const int TAB_FILE_TYPE = 72;
-static const int TAB_WIN_IDX = 4;
-static const int TAB_WIN_NAME = 10;
-static const int TAB_WIN_EDITION = 44;
-static const int TAB_WIN_VER = 64;
 
 // -----------------------------------------------------------------------------
 // Утилиты строк и кодировок
@@ -3571,12 +3511,8 @@ static bool parse_boot_catalog(FileReader& fr, uint32_t catalogLBA,
 }
 
 // -----------------------------------------------------------------------------
-// Утилиты RichEdit: таб-стопы и раскраска эмодзи
+// Очистка текста отчёта от NUL и непарных суррогатов
 // -----------------------------------------------------------------------------
-#ifndef ST_UNICODE
-#define ST_UNICODE 8
-#endif
-
 static void sanitize_wstring_for_richedit(std::wstring& s) {
     std::wstring out;
     out.reserve(s.size());
@@ -3596,300 +3532,6 @@ static void sanitize_wstring_for_richedit(std::wstring& s) {
     }
     s.swap(out);
 }
-
-static void RichSetDefaultCharFormat(HWND hRE) {
-    CHARFORMAT2W cf{};
-    cf.cbSize = sizeof(cf);
-    cf.dwMask = CFM_FACE | CFM_COLOR | CFM_SIZE | CFM_EFFECTS;
-    cf.dwEffects = 0; // clear CFE_AUTOCOLOR so light OS theme cannot paint black-on-dark
-    cf.crTextColor = g_fgColor;
-    cf.yHeight = 240;
-    StringCchCopyW(cf.szFaceName, LF_FACESIZE, L"Consolas");
-    SendMessageW(hRE, EM_SETCHARFORMAT, SCF_ALL, (LPARAM)&cf);
-    SendMessageW(hRE, EM_SETCHARFORMAT, SCF_DEFAULT, (LPARAM)&cf);
-    SendMessageW(hRE, EM_SETBKGNDCOLOR, 0, (LPARAM)g_bgColor);
-}
-
-static bool RichSetTextUnicode(HWND hRE, const std::wstring& text) {
-    if (text.empty()) {
-        SetWindowTextW(hRE, L"");
-        return true;
-    }
-    SETTEXTEX stx{};
-    stx.flags = ST_UNICODE;
-    stx.codepage = 1200;
-    LRESULT lr = SendMessageW(hRE, EM_SETTEXTEX, (WPARAM)&stx, (LPARAM)text.c_str());
-    if (lr) return true;
-    SetWindowTextW(hRE, text.c_str());
-    return GetWindowTextLengthW(hRE) > 0;
-}
-
-static void RichSetTabs(HWND hRE, const std::vector<int>& tabsChars) {
-    // Перевод «знаки» → twips по текущему шрифту RichEdit
-    HFONT hFont = (HFONT)SendMessage(hRE, WM_GETFONT, 0, 0);
-    HDC hdc = GetDC(hRE);
-    HFONT old = (HFONT)SelectObject(hdc, hFont);
-    TEXTMETRICW tm{};
-    GetTextMetricsW(hdc, &tm);
-    int dpi = GetDeviceCaps(hdc, LOGPIXELSX);
-    SelectObject(hdc, old);
-    ReleaseDC(hRE, hdc);
-
-    LONG rg[32] = { 0 };
-    int cnt = (int)std::min<size_t>(tabsChars.size(), 32);
-    for (int i = 0; i < cnt; i++) {
-        int px = tm.tmAveCharWidth * tabsChars[i];
-        LONG tw = MulDiv(px, 1440, dpi); // twips
-        rg[i] = tw;
-    }
-
-    PARAFORMAT2 pf{}; pf.cbSize = sizeof(pf);
-    pf.dwMask = PFM_TABSTOPS;
-    pf.cTabCount = cnt;
-    for (int i = 0; i < cnt; i++) pf.rgxTabs[i] = rg[i];
-    SendMessageW(hRE, EM_SETPARAFORMAT, 0, (LPARAM)&pf);
-}
-
-static bool is_high(wchar_t ch) { return ch >= 0xD800 && ch <= 0xDBFF; }
-static bool is_low(wchar_t ch) { return ch >= 0xDC00 && ch <= 0xDFFF; }
-static uint32_t cp_from_pair(wchar_t hi, wchar_t lo) {
-    return 0x10000u + (((uint32_t)hi - 0xD800u) << 10) + ((uint32_t)lo - 0xDC00u);
-}
-static bool is_emoji_cp(uint32_t cp) {
-    if (cp == 0x200D || cp == 0xFE0F) return true;              // ZWJ / VS16
-    if (cp >= 0x1F300 && cp <= 0x1FAFF) return true;            // Symbols & Pictographs
-    if (cp >= 0x1F1E6 && cp <= 0x1F1FF) return true;            // Flags
-    if (cp >= 0x2600 && cp <= 0x27BF) return true;            // Misc Symbols + Dingbats
-    return false;
-}
-struct Range { LONG a; LONG b; }; // [a,b)
-static std::vector<Range> find_emoji_ranges(const std::wstring& s) {
-    std::vector<Range> r;
-    size_t i = 0, n = s.size();
-    while (i < n) {
-        uint32_t cp = 0; size_t step = 1;
-        wchar_t ch = s[i];
-        if (is_high(ch) && i + 1 < n && is_low(s[i + 1])) { cp = cp_from_pair(ch, s[i + 1]); step = 2; }
-        else cp = (uint32_t)ch;
-
-        if (is_emoji_cp(cp)) {
-            size_t start = i; i += step;
-            // захватим последовательность с ZWJ/VS16 и следующими эмодзи
-            while (i < n) {
-                uint32_t cp2 = 0; size_t st2 = 1;
-                wchar_t c2 = s[i];
-                if (is_high(c2) && i + 1 < n && is_low(s[i + 1])) { cp2 = cp_from_pair(c2, s[i + 1]); st2 = 2; }
-                else cp2 = (uint32_t)c2;
-                if (!is_emoji_cp(cp2)) break;
-                i += st2;
-            }
-            LONG a = (LONG)start, b = (LONG)i;
-            if (b > a && (b - a) <= 64)
-                r.push_back({ a, b });
-        }
-        else {
-            i += step;
-        }
-    }
-    return r;
-}
-static void RichApplyRange(HWND hRE, LONG a, LONG b, COLORREF color, const wchar_t* optionalFace = nullptr) {
-    if (b <= a) return;
-    CHARRANGE cr{ a, b };
-    SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&cr);
-    CHARFORMAT2W cf{};
-    cf.cbSize = sizeof(cf);
-    cf.dwMask = CFM_COLOR | CFM_EFFECTS;
-    cf.dwEffects = 0;
-    cf.crTextColor = color;
-    if (optionalFace && optionalFace[0]) {
-        // Face without CHARSET/SIZE often renders U+2705 as □ in RichEdit.
-        cf.dwMask |= CFM_FACE | CFM_SIZE | CFM_CHARSET;
-        cf.bCharSet = DEFAULT_CHARSET;
-        cf.yHeight = 240;
-        StringCchCopyW(cf.szFaceName, LF_FACESIZE, optionalFace);
-    }
-    SendMessageW(hRE, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
-}
-
-static void RichApplyEmojiFace(HWND hRE, LONG a, LONG b) {
-    if (b <= a) return;
-    CHARRANGE cr{ a, b };
-    SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&cr);
-    CHARFORMAT2W cf{};
-    cf.cbSize = sizeof(cf);
-    cf.dwMask = CFM_FACE | CFM_SIZE | CFM_CHARSET;
-    cf.bCharSet = DEFAULT_CHARSET;
-    cf.yHeight = 240;
-    StringCchCopyW(cf.szFaceName, LF_FACESIZE, L"Segoe UI Emoji");
-    SendMessageW(hRE, EM_SETCHARFORMAT, SCF_SELECTION, (LPARAM)&cf);
-}
-
-static bool line_is_mostly_rule(const std::wstring& fullText, size_t ls, size_t le) {
-    size_t box = 0, other = 0;
-    for (size_t i = ls; i < le; ++i) {
-        wchar_t ch = fullText[i];
-        if (ch == L'\r' || ch == L'\n' || ch == L' ' || ch == L'\t') continue;
-        if (ch == 0x2500) ++box;
-        else ++other;
-    }
-    return box > 0 && box >= other;
-}
-
-static size_t skip_one_cp(const std::wstring& s, size_t i, size_t end) {
-    if (i >= end) return i;
-    if (is_high(s[i]) && i + 1 < end && is_low(s[i + 1])) return i + 2;
-    return i + 1;
-}
-
-// Section banners (🗂 🚀 🪟 …). Field icons like 🗓 (dates) are not headers.
-static bool is_section_header_cp(uint32_t cp) {
-    switch (cp) {
-    case 0x1F5C2: // 🗂
-    case 0x1F680: // 🚀
-    case 0x1FA9F: // 🪟
-    case 0x1F427: // 🐧
-    case 0x1F4C0: // 📀
-    case 0x1F34E: // 🍎
-    case 0x1F9F1: // 🧱
-    case 0x1F4C1: // 📁
-    case 0x1F4DA: // 📚
-    case 0x1F4DD: // 📝
-    case 0x1F4BE: // 💾
-    case 0x1F4BF: // 💿
-    case 0x1F4E6: // 📦 partition / blkx item
-    case 0x2139:  // ℹ️ note
-        return true;
-    default:
-        return false;
-    }
-}
-
-static bool label_starts(const std::wstring& s, const wchar_t* pfx) {
-    size_t n = 0;
-    while (pfx[n]) ++n;
-    return s.size() >= n && s.compare(0, n, pfx) == 0;
-}
-
-static bool is_section_label(const std::wstring& raw) {
-    size_t a = 0, b = raw.size();
-    while (a < b && (raw[a] == L' ' || raw[a] == L'\t')) ++a;
-    while (b > a && (raw[b - 1] == L' ' || raw[b - 1] == L'\t')) --b;
-    if (a >= b) return false;
-    std::wstring s = raw.substr(a, b - a);
-    return s == L"Редакции (WIM)" || s == L"WIM editions"
-        || s == L"Анализ ISO" || s == L"ISO analysis"
-        || s == L"Тип ФС" || s == L"FS type"
-        || s == L"Тип образа" || s == L"Image type"
-        || s == L"Загрузка (El Torito)" || s == L"Boot (El Torito)"
-        || s == L"Windows" || s == L"Linux" || s == L"macOS"
-        || s == L"UDF (ECMA-167)" || s == L"UDIF"
-        || s == L"Разметка диска" || s == L"Disk layout"
-        || s == L"Разделы (blkx)" || s == L"Partitions (blkx)"
-        || s == L"Содержимое" || s == L"Contents"
-        || s == L"Примечание" || s == L"Note"
-        || label_starts(s, L"Раздел #") || label_starts(s, L"Partition #");
-}
-
-static void RichColorizeReport(HWND hRE) {
-    SendMessageW(hRE, WM_SETREDRAW, FALSE, 0);
-    LRESULT eventMask = SendMessageW(hRE, EM_GETEVENTMASK, 0, 0);
-    SendMessageW(hRE, EM_SETEVENTMASK, 0, eventMask & ~ENM_SELCHANGE);
-
-    const int nlines = (int)SendMessageW(hRE, EM_GETLINECOUNT, 0, 0);
-    for (int li = 0; li < nlines; ++li) {
-        const LONG cpLine = (LONG)SendMessageW(hRE, EM_LINEINDEX, (WPARAM)li, 0);
-        if (cpLine < 0) continue;
-        wchar_t buf[8192];
-        *(WORD*)buf = 8191;
-        int n = (int)SendMessageW(hRE, EM_GETLINE, (WPARAM)li, (LPARAM)buf);
-        if (n <= 0) continue;
-        if (n > 8191) n = 8191;
-        const std::wstring line(buf, (size_t)n);
-        const size_t len = line.size();
-
-        auto apply = [&](size_t a, size_t b, COLORREF c, const wchar_t* face = nullptr) {
-            if (b > a && b <= len)
-                RichApplyRange(hRE, cpLine + (LONG)a, cpLine + (LONG)b, c, face);
-        };
-
-        if (line_is_mostly_rule(line, 0, len)) {
-            apply(0, len, g_accentRule);
-        }
-        else {
-            uint32_t cp0 = 0;
-            wchar_t ch0 = line[0];
-            if (is_high(ch0) && 1 < len && is_low(line[1]))
-                cp0 = cp_from_pair(ch0, line[1]);
-            else
-                cp0 = (uint32_t)ch0;
-
-            size_t tabPos = (size_t)-1;
-            for (size_t t = 0; t < len; ++t) {
-                if (line[t] == L'\t') { tabPos = t; break; }
-            }
-
-            size_t labelStart = 0;
-            if (is_emoji_cp(cp0) && cp0 != 0x200D && cp0 != 0xFE0F) {
-                labelStart = skip_one_cp(line, 0, len);
-                while (labelStart < len && line[labelStart] == L' ') ++labelStart;
-            }
-            std::wstring label;
-            if (tabPos != (size_t)-1 && tabPos > labelStart)
-                label.assign(line, labelStart, tabPos - labelStart);
-            else if (len > labelStart)
-                label.assign(line, labelStart, len - labelStart);
-
-            bool section = is_section_header_cp(cp0) || is_section_label(label);
-            if (section) {
-                size_t end = (tabPos != (size_t)-1) ? tabPos : len;
-                apply(0, end, g_accentHeader);
-                if (tabPos != (size_t)-1 && tabPos + 1 < len)
-                    apply(tabPos + 1, len, g_fgColor);
-            }
-            else if (len >= 9 && line.compare(0, 9, L"IsoLister") == 0) {
-                apply(0, 9, g_accentHeader);
-                if (9 < len && line[9] == L'\t')
-                    apply(10, len, g_fgColor);
-            }
-            else if (tabPos != (size_t)-1 && tabPos > 0) {
-                apply(0, tabPos, g_accentLabel);
-                if (tabPos + 1 < len)
-                    apply(tabPos + 1, len, g_fgColor);
-            }
-            else {
-                apply(0, len, g_fgColor);
-            }
-        }
-
-        for (size_t p = 0; p < len; ++p) {
-            wchar_t ch = line[p];
-            if (ch != 0x2705 && ch != 0x274C) continue;
-            size_t e = p + 1;
-            if (e < len && line[e] == 0xFE0F) ++e;
-            apply(p, e, ch == 0x2705 ? g_accentOk : g_accentErr, L"Segoe UI Emoji");
-            p = e - 1;
-        }
-
-        for (const auto& rg : find_emoji_ranges(line)) {
-            if (rg.b <= rg.a) continue;
-            bool skip = false;
-            for (LONG p = rg.a; p < rg.b; ++p) {
-                wchar_t ch = line[(size_t)p];
-                if (ch == 0x2705 || ch == 0x274C) { skip = true; break; }
-            }
-            if (!skip)
-                RichApplyEmojiFace(hRE, cpLine + rg.a, cpLine + rg.b);
-        }
-    }
-
-    CHARRANGE crNone{ -1, -1 };
-    SendMessageW(hRE, EM_EXSETSEL, 0, (LPARAM)&crNone);
-    SendMessageW(hRE, EM_SETEVENTMASK, 0, eventMask);
-    SendMessageW(hRE, WM_SETREDRAW, TRUE, 0);
-    InvalidateRect(hRE, nullptr, TRUE);
-}
-
 
 // -----------------------------------------------------------------------------
 // Чтение опций из INI
@@ -3956,231 +3598,6 @@ static void load_options_from_ini() {
         g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList,
         g_optFullScan, g_optVerbose, g_optDark, g_optDebugLog, g_uiRu ? 1 : 0, g_darkMode ? 1 : 0);
 }
-
-// -----------------------------------------------------------------------------
-// Экспортируемые WLX-функции
-// -----------------------------------------------------------------------------
-extern "C" BOOL APIENTRY DllMain(HINSTANCE hinst, DWORD reason, LPVOID) {
-    if (reason == DLL_PROCESS_ATTACH) {
-        g_hInst = hinst;
-        g_hMsftEdit = LoadLibraryW(L"Msftedit.dll"); // для RICHEDIT50W
-        // моноширинный шрифт (Consolas 10pt; fallback — Courier New)
-        g_hMonoFont = CreateFontW(
-            -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-            FIXED_PITCH | FF_MODERN, L"Consolas");
-        if (!g_hMonoFont) {
-            g_hMonoFont = CreateFontW(
-                -14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, DEFAULT_QUALITY,
-                FIXED_PITCH | FF_MODERN, L"Courier New");
-        }
-        log_line(L"DllMain: ATTACH");
-    }
-    else if (reason == DLL_PROCESS_DETACH) {
-        if (g_hMonoFont) { DeleteObject(g_hMonoFont); g_hMonoFont = nullptr; }
-        if (g_hMsftEdit) { FreeLibrary(g_hMsftEdit); g_hMsftEdit = nullptr; }
-    }
-    return TRUE;
-}
-
-
-
-static LRESULT CALLBACK RichEditSubclassProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-
-{
-
-    auto it = g_richWndProcMap.find(hwnd);
-
-    WNDPROC orig = (it != g_richWndProcMap.end()) ? it->second : DefWindowProcW;
-
-
-
-    switch (msg) {
-
-    case WM_CONTEXTMENU: {
-
-        if ((HWND)wParam != hwnd) break;
-
-        HMENU menu = CreatePopupMenu();
-
-        if (!menu) break;
-
-
-
-        CHARRANGE cr{};
-
-        SendMessageW(hwnd, EM_EXGETSEL, 0, (LPARAM)&cr);
-
-        bool hasSelection = (cr.cpMax > cr.cpMin);
-
-
-
-        AppendMenuW(menu, MF_STRING | (hasSelection ? 0 : MF_GRAYED), IDM_CTX_COPY,
-            tr(L"Копировать	Ctrl+C", L"Copy	Ctrl+C"));
-
-        AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-
-        AppendMenuW(menu, MF_STRING, IDM_CTX_SELECTALL,
-            tr(L"Выделить всё	Ctrl+A", L"Select all	Ctrl+A"));
-
-
-
-        POINT pt;
-
-        if ((short)GET_X_LPARAM(lParam) == -1 && (short)GET_Y_LPARAM(lParam) == -1) {
-
-            pt = RichEditContextPoint(hwnd);
-
-        }
-
-        else {
-
-            pt.x = GET_X_LPARAM(lParam);
-
-            pt.y = GET_Y_LPARAM(lParam);
-
-        }
-
-
-
-        int cmd = TrackPopupMenu(menu, TPM_RIGHTBUTTON | TPM_RETURNCMD, pt.x, pt.y, 0, hwnd, nullptr);
-
-        DestroyMenu(menu);
-
-        if (cmd == IDM_CTX_COPY) {
-
-            SendMessageW(hwnd, WM_COPY, 0, 0);
-
-            return 0;
-
-        }
-
-        if (cmd == IDM_CTX_SELECTALL) {
-
-            SendMessageW(hwnd, EM_SETSEL, 0, -1);
-
-            return 0;
-
-        }
-
-        return 0;
-
-    }
-
-    // WM_SIZE: do not MoveWindow(self) here — re-enters WM_SIZE and can loop.
-    // Size is set once in ListLoadW via FitWindowToParentClient; TC resizes the child itself.
-
-    case WM_NCDESTROY: {
-        WNDPROC saved = orig;
-        UnsubclassRichEdit(hwnd);
-        return CallWindowProcW(saved, hwnd, msg, wParam, lParam);
-    }
-
-    default:
-
-        break;
-
-    }
-
-
-
-    return CallWindowProcW(orig, hwnd, msg, wParam, lParam);
-
-}
-
-
-
-static POINT RichEditContextPoint(HWND hwnd)
-
-{
-
-    POINT pt{ 0, 0 };
-
-    if (GetCaretPos(&pt)) {
-
-        ClientToScreen(hwnd, &pt);
-
-        return pt;
-
-    }
-
-    RECT rc{};
-
-    if (GetClientRect(hwnd, &rc)) {
-
-        pt.x = rc.left + (rc.right - rc.left) / 2;
-
-        pt.y = rc.top + (rc.bottom - rc.top) / 2;
-
-    }
-
-    ClientToScreen(hwnd, &pt);
-
-    return pt;
-
-}
-
-
-
-static void UnsubclassRichEdit(HWND hwnd) {
-    auto it = g_richWndProcMap.find(hwnd);
-    if (it == g_richWndProcMap.end()) return;
-    WNDPROC orig = it->second;
-    g_richWndProcMap.erase(it);
-    if (IsWindow(hwnd))
-        SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)orig);
-}
-
-static void FitWindowToParentClient(HWND child, HWND parent) {
-    if (!IsWindow(child) || !IsWindow(parent)) return;
-    RECT rc{};
-    if (!GetClientRect(parent, &rc)) return;
-    int w = rc.right - rc.left;
-    int h = rc.bottom - rc.top;
-    if (w < 1) w = 1;
-    if (h < 1) h = 1;
-    MoveWindow(child, 0, 0, w, h, TRUE);
-}
-
-static HWND CreateRichEditView(HWND parent, DWORD style) {
-    static const wchar_t* kClasses[] = { MSFTEDIT_CLASS, L"RichEdit20W", nullptr };
-    for (int i = 0; kClasses[i]; ++i) {
-        const wchar_t* cls = kClasses[i];
-        if (cls == MSFTEDIT_CLASS) {
-            if (!g_hMsftEdit) g_hMsftEdit = LoadLibraryW(L"Msftedit.dll");
-            if (!g_hMsftEdit) continue;
-        }
-        else {
-            LoadLibraryW(L"Riched20.dll");
-        }
-        HWND h = CreateWindowExW(
-            WS_EX_CLIENTEDGE, cls, L"", style,
-            0, 0, 0, 0, parent, (HMENU)1, g_hInst, nullptr);
-        if (h) {
-            log_line(L"CreateRichEditView: class=%s ok", cls);
-            return h;
-        }
-        log_line(L"CreateRichEditView: class=%s failed err=%lu", cls, GetLastError());
-    }
-    return nullptr;
-}
-
-static void SubclassRichEdit(HWND hwnd) {
-    if (!IsWindow(hwnd)) return;
-    if (g_richWndProcMap.find(hwnd) != g_richWndProcMap.end()) return;
-
-    SetLastError(0);
-    WNDPROC old = (WNDPROC)SetWindowLongPtrW(hwnd, GWLP_WNDPROC, (LONG_PTR)RichEditSubclassProc);
-    if (!old || old == RichEditSubclassProc) {
-        if (GetLastError() != 0)
-            log_line(L"SetWindowLongPtrW(subclass) failed: %lu", GetLastError());
-        return;
-    }
-    g_richWndProcMap[hwnd] = old;
-}
-
-
 
 static std::wstring wim_flags_summary(uint32_t flags) {
     std::wstring s;
@@ -4776,204 +4193,29 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
     return txt.str();
 }
 
-extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowFlags)
+// -----------------------------------------------------------------------------
+// Интерфейс анализа для слоя отображения (IsoAnalysis.h)
+// -----------------------------------------------------------------------------
+std::wstring IsoAnalysis_BuildReport(const wchar_t* FileToLoad, bool compact)
 {
-    log_line(L"ListLoadW: file=\"%s\" flags=%d parent=%p", FileToLoad ? FileToLoad : L"(null)", ShowFlags, ParentWin);
-
-    if (!ParentWin || !IsWindow(ParentWin)) {
-        log_line(L"ListLoadW: invalid parent window");
-        return nullptr;
-    }
-
-    // Re-read TC DarkMode each open (user may toggle cm_SwitchDarkMode without reload)
-    {
-        wchar_t wincmd[MAX_PATH]{};
-        resolve_wincmd_ini(wincmd, MAX_PATH);
-        recompute_theme(wincmd[0] ? wincmd : nullptr, ParentWin);
-    }
-
-    bool quickView = (ShowFlags & lcp_fittowindow) != 0;
     std::wstring text;
     try {
-        text = generate_iso_report(FileToLoad, quickView);
+        text = generate_iso_report(FileToLoad, compact);
     }
     catch (...) {
-        log_line(L"ListLoadW: generate_iso_report exception");
+        log_line(L"BuildReport: generate_iso_report exception");
         text = std::wstring(tr(L"Ошибка", L"Error")) + L"\t"
             + tr(L"Не удалось сформировать отчёт ❌", L"Failed to build report ❌") + L"\r\n";
     }
     sanitize_wstring_for_richedit(text);
-    log_line(L"ListLoadW: report chars=%u quickView=%d", (unsigned)text.size(), quickView ? 1 : 0);
-
-    bool wrapText = (ShowFlags & lcp_wraptext) != 0;
-    DWORD reStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
-        ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | ES_WANTRETURN;
-    if (!wrapText) reStyle |= WS_HSCROLL | ES_AUTOHSCROLL;
-
-    HWND hRE = CreateRichEditView(ParentWin, reStyle);
-    if (!hRE) {
-        log_line(L"ListLoadW: CreateRichEditView FAILED");
-        return nullptr;
-    }
-
-    FitWindowToParentClient(hRE, ParentWin);
-    SubclassRichEdit(hRE);
-
-    if (g_hMonoFont) SendMessageW(hRE, WM_SETFONT, (WPARAM)g_hMonoFont, TRUE);
-
-    if (wrapText)
-        SendMessageW(hRE, EM_SETTARGETDEVICE, 0, 0);
-
-    std::vector<int> tabs = {
-        TAB_MAIN_1,
-        TAB_BOOT_0, TAB_BOOT_1, TAB_BOOT_2, TAB_BOOT_3,
-        TAB_BOOT_4, TAB_BOOT_5, TAB_BOOT_6, TAB_BOOT_7,
-        TAB_FILE_PATH, TAB_FILE_SIZE, TAB_FILE_TYPE,
-        TAB_WIN_IDX, TAB_WIN_NAME, TAB_WIN_EDITION, TAB_WIN_VER
-    };
-    RichSetTabs(hRE, tabs);
-
-    if (!RichSetTextUnicode(hRE, text)) {
-        log_line(L"ListLoadW: RichSetTextUnicode failed, len=%u", (unsigned)text.size());
-        RichSetTextUnicode(hRE, L"Ошибка отображения отчёта в RichEdit.\r\n");
-    }
-    // After SETTEXTEX: force Consolas + fg (SETTEXT would otherwise keep AUTOCOLOR
-    // from the light OS theme, so later lines looked dimmer than the first ones).
-    RichSetDefaultCharFormat(hRE);
-
-    RichColorizeReport(hRE);
-    SendMessageW(hRE, EM_SETSEL, 0, 0);
-    SendMessageW(hRE, EM_SCROLLCARET, 0, 0);
-
-    return hRE;
+    log_line(L"BuildReport: report chars=%u compact=%d", (unsigned)text.size(), compact ? 1 : 0);
+    return text;
 }
 
-extern "C" HWND __stdcall ListLoad(HWND ParentWin, char* FileToLoad, int ShowFlags)
+void IsoAnalysis_SetIniPath(const wchar_t* iniPath)
 {
-    int wlen = MultiByteToWideChar(CP_ACP, 0, FileToLoad ? FileToLoad : "", -1, nullptr, 0);
-    std::wstring w(wlen, L'\0');
-    MultiByteToWideChar(CP_ACP, 0, FileToLoad ? FileToLoad : "", -1, &w[0], wlen);
-    return ListLoadW(ParentWin, &w[0], ShowFlags);
-}
-
-// Detect: ISO/DMG/WIM/ESD — обычные файлы; IMG — MULTIMEDIA в TC, без этого флага плагин игнорируется.
-// IMG: MULTIMEDIA required by TC; no bare EXT="IMG" (would steal GEM/picture .img).
-// BIN: raw dumps; VHD/VHDX: Hyper-V images.
-static const char kIsoListerDetectString[] =
-    "EXT=\"ISO\" | EXT=\"DMG\" | EXT=\"WIM\" | EXT=\"ESD\" | EXT=\"VHD\" | EXT=\"VHDX\" | "
-    "(EXT=\"BIN\" & [510]=85 & [511]=170) | "
-    "(EXT=\"BIN\" & SIZE>50000000) | "
-    "(MULTIMEDIA & EXT=\"IMG\" & [510]=85 & [511]=170) | "
-    "(MULTIMEDIA & EXT=\"IMG\" & [32769]=67 & [32770]=68 & [32771]=48 & [32772]=48 & [32773]=49) | "
-    "(MULTIMEDIA & EXT=\"IMG\" & SIZE>50000000)";
-
-extern "C" void __stdcall ListGetDetectString(char* DetectString, int maxlen)
-{
-    StringCchCopyA(DetectString, (size_t)maxlen, kIsoListerDetectString);
-    log_line(L"ListGetDetectString called: %hs", kIsoListerDetectString);
-}
-
-extern "C" void __stdcall ListCloseWindow(HWND ListWin)
-{
-    log_line(L"ListCloseWindow hwnd=%p", ListWin);
-    if (!ListWin) return;
-    if (!IsWindow(ListWin)) {
-        g_richWndProcMap.erase(ListWin);
-        return;
-    }
-    UnsubclassRichEdit(ListWin);
-    DestroyWindow(ListWin);
-}
-
-extern "C" int __stdcall ListSendCommand(HWND ListWin, int Command, int Parameter)
-{
-    UNREFERENCED_PARAMETER(Parameter);
-    if (!IsWindow(ListWin)) return LISTPLUGIN_ERROR;
-
-    switch (Command) {
-    case lc_copy:
-        SendMessageW(ListWin, WM_COPY, 0, 0);
-        return LISTPLUGIN_OK;
-    case lc_selectall:
-        SendMessageW(ListWin, EM_SETSEL, 0, -1);
-        return LISTPLUGIN_OK;
-    case lc_newparams: {
-        wchar_t wincmd[MAX_PATH]{};
-        resolve_wincmd_ini(wincmd, MAX_PATH);
-        recompute_theme(wincmd[0] ? wincmd : nullptr, GetParent(ListWin));
-        RichSetDefaultCharFormat(ListWin);
-        RichColorizeReport(ListWin);
-        InvalidateRect(ListWin, nullptr, TRUE);
-        return LISTPLUGIN_OK;
-    }
-    default:
-        break;
-    }
-
-    return LISTPLUGIN_ERROR;
-}
-
-extern "C" int __stdcall ListSearchTextW(HWND ListWin, WCHAR* SearchString, int SearchParameter)
-{
-    if (!IsWindow(ListWin) || !SearchString || !SearchString[0])
-        return LISTPLUGIN_ERROR;
-
-    CHARRANGE sel{};
-    SendMessageW(ListWin, EM_EXGETSEL, 0, (LPARAM)&sel);
-
-    FINDTEXTEXW ft{};
-    ft.lpstrText = SearchString;
-    bool backwards = (SearchParameter & lcs_backwards) != 0;
-    if (SearchParameter & lcs_findfirst) {
-        if (backwards) {
-            ft.chrg.cpMin = -1;
-            ft.chrg.cpMax = 0;
-        }
-        else {
-            ft.chrg.cpMin = 0;
-            ft.chrg.cpMax = -1;
-        }
-    }
-    else if (backwards) {
-        ft.chrg.cpMin = sel.cpMin;
-        ft.chrg.cpMax = 0;
-    }
-    else {
-        ft.chrg.cpMin = sel.cpMax;
-        ft.chrg.cpMax = -1;
-    }
-
-    DWORD flags = 0;
-    if (!backwards) flags |= FR_DOWN;
-    if (SearchParameter & lcs_matchcase) flags |= FR_MATCHCASE;
-    if (SearchParameter & lcs_wholewords) flags |= FR_WHOLEWORD;
-
-    LRESULT pos = SendMessageW(ListWin, EM_FINDTEXTEXW, flags, (LPARAM)&ft);
-    if (pos < 0) return LISTPLUGIN_ERROR;
-
-    SendMessageW(ListWin, EM_EXSETSEL, 0, (LPARAM)&ft.chrgText);
-    SendMessageW(ListWin, EM_SCROLLCARET, 0, 0);
-    return LISTPLUGIN_OK;
-}
-
-extern "C" int __stdcall ListSearchText(HWND ListWin, char* SearchString, int SearchParameter)
-{
-    if (!SearchString) return LISTPLUGIN_ERROR;
-    int wlen = MultiByteToWideChar(CP_ACP, 0, SearchString, -1, nullptr, 0);
-    if (wlen <= 0) return LISTPLUGIN_ERROR;
-    std::wstring w((size_t)wlen, L'\0');
-    MultiByteToWideChar(CP_ACP, 0, SearchString, -1, &w[0], wlen);
-    if (!w.empty() && w.back() == L'\0') w.pop_back();
-    return ListSearchTextW(ListWin, w.empty() ? (WCHAR*)L"" : &w[0], SearchParameter);
-}
-
-extern "C" void __stdcall ListSetDefaultParams(ListDefaultParamStruct* dps)
-{
-    if (dps && dps->DefaultIniName && dps->DefaultIniName[0]) {
-        int wlen = MultiByteToWideChar(CP_ACP, 0, dps->DefaultIniName, -1, nullptr, 0);
-        g_iniPath.assign(wlen, L'\0');
-        MultiByteToWideChar(CP_ACP, 0, dps->DefaultIniName, -1, &g_iniPath[0], wlen);
-        if (!g_iniPath.empty() && g_iniPath.back() == L'\0') g_iniPath.pop_back();
+    if (iniPath && iniPath[0]) {
+        g_iniPath = iniPath;
         log_line(L"ListSetDefaultParams: INI=%s", g_iniPath.c_str());
         load_options_from_ini();
     }
@@ -4981,6 +4223,34 @@ extern "C" void __stdcall ListSetDefaultParams(ListDefaultParamStruct* dps)
         log_line(L"ListSetDefaultParams: no INI passed");
     }
 }
+
+std::wstring IsoAnalysis_IniPath() { return g_iniPath; }
+
+std::wstring IsoAnalysis_WincmdIni()
+{
+    wchar_t wincmd[MAX_PATH]{};
+    resolve_wincmd_ini(wincmd, MAX_PATH);
+    return wincmd;
+}
+
+bool IsoAnalysis_UiRussian() { return g_uiRu; }
+
+const wchar_t* IsoAnalysis_Tr(const wchar_t* ru, const wchar_t* en) { return tr(ru, en); }
+
+int IsoAnalysis_DarkOption() { return g_optDark; }
+
+bool IsoAnalysis_DetectDark(HWND parentHint)
+{
+    // Re-read TC DarkMode each open (user may toggle cm_SwitchDarkMode without reload)
+    wchar_t wincmd[MAX_PATH]{};
+    resolve_wincmd_ini(wincmd, MAX_PATH);
+    recompute_theme(wincmd[0] ? wincmd : nullptr, parentHint);
+    return g_darkMode;
+}
+
+std::wstring IsoAnalysis_FormatSize(uint64_t bytes) { return FormatFileSize(bytes); }
+
+void IsoAnalysis_Log(const wchar_t* msg) { log_line(L"%s", msg ? msg : L""); }
 
 #ifdef ISO_LISTER_STANDALONE
 #include <stdio.h>
