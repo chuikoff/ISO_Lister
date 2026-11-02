@@ -50,7 +50,7 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 - раздел **Linux** — `/.disk/info`, casper, ядро, initrd;
 - крупнейшие файлы, конфиги, опционально — полный список файлов и Boot Catalog.
 
-В **Ctrl+Q** выводится **компактная сводка** (без PVD/UDF и технических таблиц).
+В **Ctrl+Q** выводится **компактная сводка** (без PVD/UDF и технических таблиц); отключается через `CompactQuickView=0`. Настройка TC `ShrinkBitmap` («вписать в окно») на объём отчёта не влияет.
 
 ### Установка
 
@@ -104,6 +104,7 @@ EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | 
 | `ScanDepth` | `6` | Глубина каталогов при `FullScan=1` |
 | `MaxNodes` | `40000` | Лимит узлов при полном скане |
 | `MaxFileList` | `1000` | Макс. файлов в списке |
+| `CompactQuickView` | `1` | `1` — компактная сводка в быстром просмотре (Ctrl+Q); `0` — полный отчёт и там |
 | `DebugLog` | `0` (Release) / `1` (Debug) | `1` — писать диагностику в `%TEMP%\IsoLister.log` |
 
 Язык UI: если в `wincmd.ini` `LanguageIni`/`LanguageDll` содержит **RUS** — русский отчёт; иначе **английский**.
@@ -121,6 +122,7 @@ Verbose=0
 Dark=2
 ShowFileList=0
 ShowBootEntries=0
+CompactQuickView=1
 DebugLog=0
 ; Theme=auto|light|dark (v1.2.0+, приоритетнее Dark)
 ```
@@ -190,7 +192,7 @@ Screenshots: see the Russian section above (`docs/windows.png`, `docs/linux.png`
 - **Linux** — `/.disk/info`, casper, kernel, initrd;
 - largest files, config hits; optional full file list and Boot Catalog.
 
-**Ctrl+Q** shows a **compact summary** only (no PVD/UDF technical blocks).
+**Ctrl+Q** shows a **compact summary** only (no PVD/UDF technical blocks); set `CompactQuickView=0` to get the full report there too. TC's `ShrinkBitmap` (fit to window) setting does not affect the report.
 
 ### Installation
 
@@ -244,6 +246,7 @@ Section `[IsoLister]` in `%APPDATA%\GHISLER\lsplugin.ini` (or `wincmd.ini`):
 | `ScanDepth` | `6` | Directory depth when `FullScan=1` |
 | `MaxNodes` | `40000` | Node limit for full scan |
 | `MaxFileList` | `1000` | Max files in list |
+| `CompactQuickView` | `1` | `1` — compact summary in Quick View (Ctrl+Q); `0` — full report there too |
 | `DebugLog` | `0` (Release) / `1` (Debug) | `1` — write diagnostics to `%TEMP%\IsoLister.log` |
 
 UI language: if `wincmd.ini` `LanguageIni`/`LanguageDll` contains **RUS** → Russian report; otherwise **English**.
@@ -261,6 +264,7 @@ Verbose=0
 Dark=2
 ShowFileList=0
 ShowBootEntries=0
+CompactQuickView=1
 DebugLog=0
 ; Theme=auto|light|dark (v1.2.0+, overrides Dark)
 ```

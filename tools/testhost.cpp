@@ -77,12 +77,14 @@ int wmain(int argc, wchar_t** argv) {
         if (b) { save_bmp(b, prev); DeleteObject(b); }
         return b ? 0 : 1;
     }
-    WNDCLASSW wc = {}; wc.lpfnWndProc = Proc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = L"TestLister";
+    // --quick stands in for Ctrl+Q: the real plugin treats only a TTOTAL_CMD root as Quick View.
+    const wchar_t* hostClass = (flags & 2) ? L"TTOTAL_CMD" : L"TestLister";
+    WNDCLASSW wc = {}; wc.lpfnWndProc = Proc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = hostClass;
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
     std::wstring t = L"Lister - [" + std::wstring(argv[2]) + L"]";
     RECT wr = { 0, 0, ww, wh }; AdjustWindowRect(&wr, WS_OVERLAPPEDWINDOW, FALSE); // --size is the client size
-    HWND main = CreateWindowExW(0, L"TestLister", t.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN, 0, 0, wr.right - wr.left, wr.bottom - wr.top, nullptr, nullptr, wc.hInstance, nullptr);
+    HWND main = CreateWindowExW(0, hostClass, t.c_str(), WS_OVERLAPPEDWINDOW | WS_VISIBLE | WS_CLIPCHILDREN, 0, 0, wr.right - wr.left, wr.bottom - wr.top, nullptr, nullptr, wc.hInstance, nullptr);
     DWORD t0 = GetTickCount();
     g_plugin = load ? load(main, argv[2], flags) : nullptr;
     fprintf(stderr, "ListLoadW -> %p in %lu ms\n", (void*)g_plugin, GetTickCount() - t0);

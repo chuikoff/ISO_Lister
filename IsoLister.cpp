@@ -50,6 +50,9 @@ static int g_optShowFileList = 0;
 static int g_optMaxFileList = 1000;
 static int g_optFullScan = 0;
 static int g_optVerbose = 0; // 0 = краткий отчёт (без PVD/Path Table и т.п.)
+// CompactQuickView: 1 = компактная сводка в Ctrl+Q, 0 = полный отчёт и там.
+// Не зависит от lcp_fittowindow (ShrinkBitmap), см. issue #7.
+static int g_optCompactQuickView = 1;
 // Dark: 0=force light, 1=force dark, 2=auto → TC [Configuration] DarkMode (cm_SwitchDarkMode)
 static int g_optDark = 2;
 static int g_optDebugLog =
@@ -3547,6 +3550,7 @@ static void load_options_from_ini_file(const wchar_t* iniPath) {
     int verbose = GetPrivateProfileIntW(L"IsoLister", L"Verbose", g_optVerbose, iniPath);
     int dark = GetPrivateProfileIntW(L"IsoLister", L"Dark", g_optDark, iniPath);
     int dbg = GetPrivateProfileIntW(L"IsoLister", L"DebugLog", g_optDebugLog, iniPath);
+    int compactQv = GetPrivateProfileIntW(L"IsoLister", L"CompactQuickView", g_optCompactQuickView, iniPath);
     g_optDepth = (depth > 0 && depth <= 32) ? depth : g_optDepth;
     g_optMaxNodes = (maxN >= 1000 && maxN <= 1000000) ? maxN : g_optMaxNodes;
     g_optShowBootEntries = (showB != 0) ? 1 : 0;
@@ -3556,6 +3560,7 @@ static void load_options_from_ini_file(const wchar_t* iniPath) {
     g_optVerbose = (verbose != 0) ? 1 : 0;
     if (dark >= 0 && dark <= 2) g_optDark = dark;
     g_optDebugLog = (dbg != 0) ? 1 : 0;
+    g_optCompactQuickView = (compactQv != 0) ? 1 : 0;
 }
 
 static void resolve_wincmd_ini(wchar_t* out, size_t cch) {
@@ -3594,9 +3599,9 @@ static void load_options_from_ini() {
     // Theme follows TC DarkMode (cm_SwitchDarkMode), not OS AppsUseLightTheme
     recompute_theme(wincmd[0] ? wincmd : (g_iniPath.empty() ? nullptr : g_iniPath.c_str()));
 
-    log_line(L"Options: ScanDepth=%d MaxNodes=%d ShowBootEntries=%d ShowFileList=%d MaxFileList=%d FullScan=%d Verbose=%d Dark=%d DebugLog=%d uiRu=%d darkMode=%d",
+    log_line(L"Options: ScanDepth=%d MaxNodes=%d ShowBootEntries=%d ShowFileList=%d MaxFileList=%d FullScan=%d Verbose=%d CompactQuickView=%d Dark=%d DebugLog=%d uiRu=%d darkMode=%d",
         g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList,
-        g_optFullScan, g_optVerbose, g_optDark, g_optDebugLog, g_uiRu ? 1 : 0, g_darkMode ? 1 : 0);
+        g_optFullScan, g_optVerbose, g_optCompactQuickView, g_optDark, g_optDebugLog, g_uiRu ? 1 : 0, g_darkMode ? 1 : 0);
 }
 
 static std::wstring wim_flags_summary(uint32_t flags) {
@@ -4208,7 +4213,7 @@ std::wstring IsoAnalysis_BuildReport(const wchar_t* FileToLoad, bool compact)
             + tr(L"Не удалось сформировать отчёт ❌", L"Failed to build report ❌") + L"\r\n";
     }
     sanitize_wstring_for_richedit(text);
-    log_line(L"BuildReport: report chars=%u compact=%d", (unsigned)text.size(), compact ? 1 : 0);
+    log_line(L"BuildReport: report chars=%u quickView=%d", (unsigned)text.size(), compact ? 1 : 0);
     return text;
 }
 
@@ -4238,6 +4243,8 @@ bool IsoAnalysis_UiRussian() { return g_uiRu; }
 const wchar_t* IsoAnalysis_Tr(const wchar_t* ru, const wchar_t* en) { return tr(ru, en); }
 
 int IsoAnalysis_DarkOption() { return g_optDark; }
+
+int IsoAnalysis_CompactQuickView() { return g_optCompactQuickView; }
 
 bool IsoAnalysis_DetectDark(HWND parentHint)
 {

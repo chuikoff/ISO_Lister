@@ -134,7 +134,7 @@ static void make_palette(Pal& p, bool dark, COLORREF band) {
         p.ok_bg = hex(0xf1faea); p.ok_bd = hex(0xd8eec6); p.ok_lbl = hex(0x5b7a43); p.ok_num = hex(0x2f6b00);
         const unsigned tg[IsoTagCount] = { 0x6e7781, 0x1a7f37, 0xcf222e, 0x9a6700, 0x8c959f };
         for (int i = 0; i < IsoTagCount; i++) p.tag[i] = hex(tg[i]);
-        p.find = hex(0xffd33d); p.find_text = hex(0x1f2328);
+        p.find = hex(0xffd33d); p.find_text = hex(0x3b2a00);
     } else {
         p.bg = hex(0x16191d); p.text = hex(0xe6e8eb); p.muted = hex(0x8b949e); p.key = hex(0x8b949e); p.footer = hex(0x7d8792);
         p.tile_hint = hex(0x8b949e); p.rule = hex(0x2a3037);
@@ -594,11 +594,21 @@ static void hero_glyph(View* v, int bx, int by, int box) {
 }
 
 static void layout(View* v) {
+    // Resize rebuilds every element, so keep the hit by its text, not by index.
+    std::wstring hitText;
+    int hitOcc = 0, hitOff = v->m_off, hitLen = v->m_len;
+    if (hitLen > 0 && v->m_el >= 0 && v->m_el < (int)v->els.size()) {
+        const El& hit = v->els[v->m_el];
+        if (hit.type == El::Text && hit.search && hitOff >= 0 && hitOff + hitLen <= (int)hit.s.size()) {
+            hitText = hit.s;
+            for (int i = 0; i < v->m_el; i++)
+                if (v->els[i].type == El::Text && v->els[i].search && v->els[i].s == hitText) hitOcc++;
+        }
+    }
     RECT rc; GetClientRect(v->hwnd, &rc);
     int W = std::max(1, (int)rc.right);
     v->lay_w = W;
     v->els.clear(); v->rows.clear();
-    v->m_el = -1;
     const Pal& p = v->pal;
     // hero
     int H = v->S(132);
@@ -683,6 +693,18 @@ static void layout(View* v) {
     }
     y = std::max(colY[0], colY[1]);
     v->doc_h = y + v->S(14);
+    v->m_el = -1;
+    v->m_off = hitOff;
+    v->m_len = hitLen;
+    if (hitText.empty() || hitLen <= 0) return;
+    int seen = 0;
+    for (int i = 0; i < (int)v->els.size(); i++) {
+        const El& e = v->els[i];
+        if (e.type != El::Text || !e.search || e.s != hitText) continue;
+        if (hitOff + hitLen > (int)e.s.size()) continue;
+        if (seen == hitOcc) { v->m_el = i; return; }
+        seen++;
+    }
 }
 
 static void update_scroll(View* v) {
@@ -710,6 +732,68 @@ static void scroll_to(View* v, int y) {
 }
 
 // ---- painting
+// One wrapped line: glyphs are [b, e), the next line starts at next (a break space is skipped).
+struct WLine { int b, e, next; };
+// Break the way DrawText does with DT_WORDBREAK|DT_EDITCONTROL, so a hit is a span, not the whole cell.
+static void wrap_lines(HDC dc, const wchar_t* s, int n, int width, std::vector<WLine>& out) {
+    int i = 0;
+    while (i < n && (int)out.size() <= n) {
+        if (s[i] == L'\r' || s[i] == L'\n') {
+            wchar_t c = s[i];
+            int next = i + 1;
+            if (next < n && (s[next] == L'\r' || s[next] == L'\n') && s[next] != c) next++;
+            out.push_back({ i, i, next });
+            i = next;
+            continue;
+        }
+        int seg = i;
+        while (seg < n && s[seg] != L'\r' && s[seg] != L'\n') seg++;
+        int remain = seg - i;
+        INT fit = 0;
+        SIZE sz = {};
+        if (width > 0) GetTextExtentExPointW(dc, s + i, remain, width, &fit, nullptr, &sz);
+        if (fit >= remain) {
+            int next = seg;
+            if (next < n && (s[next] == L'\r' || s[next] == L'\n')) {
+                wchar_t c = s[next];
+                next++;
+                if (next < n && (s[next] == L'\r' || s[next] == L'\n') && s[next] != c) next++;
+            }
+            out.push_back({ i, seg, next });
+            i = next;
+            continue;
+        }
+        int lastSp = -1;
+        int fitted = std::max(0, std::min(fit, remain));
+        for (int k = fitted - 1; k >= 0; k--) if (s[i + k] == L' ' || s[i + k] == L'\t') { lastSp = k; break; }
+        if (lastSp > 0) {
+            out.push_back({ i, i + lastSp, i + lastSp + 1 });
+            i += lastSp + 1;
+        } else {
+            int take = std::max(1, fitted > 0 ? fitted : 1);
+            if (take > remain) take = remain;
+            out.push_back({ i, i + take, i + take });
+            i += take;
+        }
+    }
+}
+static void add_find_rect(HDC dc, COLORREF color, HRGN clip, const RECT& bounds, RECT hr) {
+    if (hr.left < bounds.left) hr.left = bounds.left;
+    if (hr.right > bounds.right) hr.right = bounds.right;
+    if (hr.top < bounds.top) hr.top = bounds.top;
+    if (hr.bottom > bounds.bottom) hr.bottom = bounds.bottom;
+    if (hr.right <= hr.left || hr.bottom <= hr.top) return;
+    HBRUSH hb = CreateSolidBrush(color);
+    FillRect(dc, &hr, hb);
+    DeleteObject(hb);
+    if (!clip) return;
+    HRGN one = CreateRectRgnIndirect(&hr);
+    if (!one) return;
+    RECT box;
+    int kind = GetRgnBox(clip, &box);
+    CombineRgn(clip, kind == NULLREGION ? one : clip, one, kind == NULLREGION ? RGN_COPY : RGN_OR);
+    DeleteObject(one);
+}
 static void round_rect(HDC dc, const RECT& r, int rad, COLORREF fill, COLORREF border) {
     using namespace Gdiplus;
     Graphics g(dc);
@@ -764,33 +848,59 @@ static void paint(View* v, HDC out) {
         COLORREF tc = e.color;
         HGDIOBJ of = SelectObject(dc, v->fonts[e.font]);
         SetTextCharacterExtra(dc, e.extra);
-        if ((int)i == v->m_el && v->m_len > 0) {
-            RECT hr = r;
-            bool single = (e.fmt & DT_SINGLELINE) || text_size(v, e.font, e.s, r.right - r.left, e.fmt, e.extra).cy <= line_h(v, e.font);
+        if ((int)i == v->m_el && v->m_len > 0 && v->m_off >= 0 && v->m_off < (int)e.s.size()) {
+            int m0 = v->m_off, m1 = std::min(v->m_off + v->m_len, (int)e.s.size());
+            RECT probe = { 0, 0, 10000, 0 };
+            DrawTextW(dc, L"Ag", 2, &probe, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
+            int lh = std::max(1, (int)(probe.bottom - probe.top));
+            bool single = (e.fmt & DT_SINGLELINE) || (r.bottom - r.top) <= lh;
+            HRGN clip = CreateRectRgn(0, 0, 0, 0);
             if (single) {
                 SIZE a = {}, b = {}, full = {};
-                GetTextExtentPoint32W(dc, e.s.c_str(), v->m_off, &a);
-                GetTextExtentPoint32W(dc, e.s.c_str() + v->m_off, v->m_len, &b);
+                GetTextExtentPoint32W(dc, e.s.c_str(), m0, &a);
+                GetTextExtentPoint32W(dc, e.s.c_str() + m0, m1 - m0, &b);
                 GetTextExtentPoint32W(dc, e.s.c_str(), (int)e.s.size(), &full);
                 int x0 = r.left;
                 if (e.fmt & DT_RIGHT) x0 = r.right - full.cx;
                 else if (e.fmt & DT_CENTER) x0 = r.left + (r.right - r.left - full.cx) / 2;
-                hr.left = x0 + a.cx - 1; hr.right = std::min((int)r.right, (int)(x0 + a.cx + b.cx + 1));
-                hr.bottom = std::min((int)r.bottom, (int)r.top + line_h(v, e.font));
-                if (e.fmt & DT_VCENTER) { int lh = line_h(v, e.font); hr.top = r.top + (r.bottom - r.top - lh) / 2; hr.bottom = hr.top + lh; }
+                RECT hr = r;
+                hr.left = x0 + a.cx - 1; hr.right = x0 + a.cx + b.cx + 1;
+                hr.bottom = r.top + lh;
+                if (e.fmt & DT_VCENTER) { hr.top = r.top + (r.bottom - r.top - lh) / 2; hr.bottom = hr.top + lh; }
+                add_find_rect(dc, p.find, clip, r, hr);
+            } else {
+                std::vector<WLine> lines;
+                wrap_lines(dc, e.s.c_str(), (int)e.s.size(), std::max(0, (int)(r.right - r.left)), lines);
+                int y = r.top;
+                for (const WLine& ln : lines) {
+                    if (y >= r.bottom) break;
+                    int a = std::max(ln.b, m0);
+                    int b = std::min(ln.e, m1);
+                    if (m0 < ln.next && m1 > ln.e) b = std::max(b, std::min(m1, ln.next));
+                    if (a < b) {
+                        SIZE pre = {}, hit = {};
+                        GetTextExtentPoint32W(dc, e.s.c_str() + ln.b, a - ln.b, &pre);
+                        GetTextExtentPoint32W(dc, e.s.c_str() + a, b - a, &hit);
+                        RECT hr = { r.left + pre.cx - 1, y, r.left + pre.cx + hit.cx + 1, y + lh };
+                        add_find_rect(dc, p.find, clip, r, hr);
+                    }
+                    y += lh;
+                }
             }
-            HBRUSH hb = CreateSolidBrush(p.find); FillRect(dc, &hr, hb); DeleteObject(hb);
-            if (single) {
-                SetTextColor(dc, tc);
-                DrawTextW(dc, e.s.c_str(), (int)e.s.size(), &r, e.fmt | DT_NOPREFIX);
-                HRGN rg = CreateRectRgnIndirect(&hr); SelectClipRgn(dc, rg);
-                SetTextColor(dc, p.find_text);
-                DrawTextW(dc, e.s.c_str(), (int)e.s.size(), &r, e.fmt | DT_NOPREFIX);
-                SelectClipRgn(dc, nullptr); DeleteObject(rg);
-                SetTextCharacterExtra(dc, 0); SelectObject(dc, of);
-                continue;
+            SetTextColor(dc, tc);
+            DrawTextW(dc, e.s.c_str(), (int)e.s.size(), &r, e.fmt | DT_NOPREFIX);
+            if (clip) {
+                RECT box;
+                if (GetRgnBox(clip, &box) != NULLREGION) {
+                    SelectClipRgn(dc, clip);
+                    SetTextColor(dc, p.find_text);
+                    DrawTextW(dc, e.s.c_str(), (int)e.s.size(), &r, e.fmt | DT_NOPREFIX);
+                    SelectClipRgn(dc, nullptr);
+                }
+                DeleteObject(clip);
             }
-            tc = p.find_text;
+            SetTextCharacterExtra(dc, 0); SelectObject(dc, of);
+            continue;
         }
         SetTextColor(dc, tc);
         DrawTextW(dc, e.s.c_str(), (int)e.s.size(), &r, e.fmt | DT_NOPREFIX);
@@ -854,7 +964,7 @@ static void context_menu(View* v, int sx, int sy) {
     if (row >= 0 && !val.empty()) AppendMenuW(m, MF_STRING, 1, T(L"Копировать значение", L"Copy value"));
     if (v->sel_a >= 0 || v->sel_all)
         AppendMenuW(m, MF_STRING, 2, multi ? T(L"Копировать выделенное", L"Copy selection") : T(L"Копировать строку", L"Copy line"));
-    AppendMenuW(m, MF_STRING, 3, (std::wstring(T(L"Копировать всё", L"Copy all")) + L"\tCtrl+C").c_str());
+    AppendMenuW(m, MF_STRING, 3, T(L"Копировать всё", L"Copy all"));
     AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(m, MF_STRING, 4, (std::wstring(T(L"Выделить всё", L"Select all")) + L"\tCtrl+A").c_str());
     int cmd = (int)TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON, pt.x, pt.y, 0, v->hwnd, nullptr);
@@ -863,6 +973,15 @@ static void context_menu(View* v, int sx, int sy) {
     else if (cmd == 2) do_copy(v);
     else if (cmd == 3) set_clipboard(v->hwnd, v->m.text);
     else if (cmd == 4) select_all(v);
+}
+
+// Ctrl+Q embeds the plugin in the TC main window. lcp_fittowindow is ShrinkBitmap, not Quick View (issue #7).
+static bool is_tc_quick_view(HWND parent) {
+    HWND root = parent ? GetAncestor(parent, GA_ROOT) : nullptr;
+    if (!root) return false;
+    wchar_t cls[64] = {};
+    if (!GetClassNameW(root, cls, 64)) return false;
+    return _wcsicmp(cls, L"TTOTAL_CMD") == 0;
 }
 
 // ---- loading
@@ -875,7 +994,11 @@ static void load_file(View* v, const wchar_t* path) {
     WIN32_FILE_ATTRIBUTE_DATA fa = {};
     v->haveSize = GetFileAttributesExW(v->path.c_str(), GetFileExInfoStandard, &fa) != 0;
     v->size = v->haveSize ? ((unsigned long long)fa.nFileSizeHigh << 32) | fa.nFileSizeLow : 0;
-    bool quick = (v->flags & lcp_fittowindow) != 0; // Ctrl+Q: compact report, as before
+    bool fit = (v->flags & lcp_fittowindow) != 0;
+    bool quick = IsoAnalysis_CompactQuickView() != 0 && is_tc_quick_view(GetParent(v->hwnd));
+    wchar_t msg[128];
+    StringCchPrintfW(msg, 128, L"load_file: quickView=%d fitToWindow=%d", quick ? 1 : 0, fit ? 1 : 0);
+    IsoAnalysis_Log(msg);
     std::wstring text = IsoAnalysis_BuildReport(v->path.c_str(), quick);
     IsoParseReport(text, IsoAnalysis_UiRussian(), v->m);
     v->sy = 0; v->sel_a = v->sel_b = -1; v->sel_all = false; v->m_el = -1;
@@ -1016,7 +1139,6 @@ HWND IsoView_Create(HWND parent, const wchar_t* path, int showFlags, HINSTANCE i
     HCURSOR oc = SetCursor(LoadCursor(nullptr, IDC_WAIT));
     load_file(v, path);
     SetCursor(oc);
-    SetFocus(h);
     return h;
 }
 int IsoView_Load(HWND view, const wchar_t* path, int showFlags) {

@@ -20,6 +20,8 @@ const wchar_t* IsoAnalysis_Tr(const wchar_t* ru, const wchar_t* en);
 // [IsoLister] Dark=0|1|2 (свет / тёмная / авто) и прежняя эвристика темы:
 // wincmd.ini [Configuration] DarkMode, [Lister] BgColor, яркость родителя.
 int IsoAnalysis_DarkOption();
+// [IsoLister] CompactQuickView: 1 — краткий отчёт в Ctrl+Q, 0 — полный и там.
+int IsoAnalysis_CompactQuickView();
 bool IsoAnalysis_DetectDark(HWND parentHint);
 
 std::wstring IsoAnalysis_FormatSize(uint64_t bytes);
