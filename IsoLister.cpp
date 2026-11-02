@@ -90,6 +90,9 @@ static int g_optShowFileList = 0;
 static int g_optMaxFileList = 1000;
 static int g_optFullScan = 0;
 static int g_optVerbose = 0; // 0 = краткий отчёт (без PVD/Path Table и т.п.)
+// CompactQuickView: 1 = компактная сводка в панели быстрого просмотра TC (Ctrl+Q),
+// 0 = полный отчёт и там. Не зависит от lcp_fittowindow (ShrinkBitmap), см. issue #7.
+static int g_optCompactQuickView = 1;
 // Dark: 0=force light, 1=force dark, 2=auto → TC [Configuration] DarkMode (cm_SwitchDarkMode)
 static int g_optDark = 2;
 static int g_optDebugLog =
@@ -3905,6 +3908,7 @@ static void load_options_from_ini_file(const wchar_t* iniPath) {
     int verbose = GetPrivateProfileIntW(L"IsoLister", L"Verbose", g_optVerbose, iniPath);
     int dark = GetPrivateProfileIntW(L"IsoLister", L"Dark", g_optDark, iniPath);
     int dbg = GetPrivateProfileIntW(L"IsoLister", L"DebugLog", g_optDebugLog, iniPath);
+    int compactQv = GetPrivateProfileIntW(L"IsoLister", L"CompactQuickView", g_optCompactQuickView, iniPath);
     g_optDepth = (depth > 0 && depth <= 32) ? depth : g_optDepth;
     g_optMaxNodes = (maxN >= 1000 && maxN <= 1000000) ? maxN : g_optMaxNodes;
     g_optShowBootEntries = (showB != 0) ? 1 : 0;
@@ -3914,6 +3918,7 @@ static void load_options_from_ini_file(const wchar_t* iniPath) {
     g_optVerbose = (verbose != 0) ? 1 : 0;
     if (dark >= 0 && dark <= 2) g_optDark = dark;
     g_optDebugLog = (dbg != 0) ? 1 : 0;
+    g_optCompactQuickView = (compactQv != 0) ? 1 : 0;
 }
 
 static void resolve_wincmd_ini(wchar_t* out, size_t cch) {
@@ -4776,6 +4781,18 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
     return txt.str();
 }
 
+// Быстрый просмотр (Ctrl+Q) TC встраивает плагин в главное окно (класс TTOTAL_CMD),
+// полный Lister (F3) — в отдельное окно TLister. Флаг lcp_fittowindow для этого
+// не годится: TC ставит его по настройке ShrinkBitmap / «вписать в окно» (issue #7).
+static bool is_tc_quick_view(HWND parent)
+{
+    HWND root = parent ? GetAncestor(parent, GA_ROOT) : nullptr;
+    if (!root) return false;
+    wchar_t cls[64]{};
+    if (!GetClassNameW(root, cls, (int)(sizeof(cls) / sizeof(cls[0])))) return false;
+    return _wcsicmp(cls, L"TTOTAL_CMD") == 0;
+}
+
 extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowFlags)
 {
     log_line(L"ListLoadW: file=\"%s\" flags=%d parent=%p", FileToLoad ? FileToLoad : L"(null)", ShowFlags, ParentWin);
@@ -4792,7 +4809,10 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
         recompute_theme(wincmd[0] ? wincmd : nullptr, ParentWin);
     }
 
-    bool quickView = (ShowFlags & lcp_fittowindow) != 0;
+    // Компактная сводка — только в быстром просмотре и только если CompactQuickView=1.
+    // Раньше режим включался по lcp_fittowindow, и при ShrinkBitmap=1/2 в wincmd.ini
+    // F3 тоже показывал сокращённый отчёт без FullScan/Verbose/ShowFileList/ShowBootEntries.
+    bool quickView = g_optCompactQuickView && is_tc_quick_view(ParentWin);
     std::wstring text;
     try {
         text = generate_iso_report(FileToLoad, quickView);
@@ -4803,7 +4823,8 @@ extern "C" HWND __stdcall ListLoadW(HWND ParentWin, WCHAR* FileToLoad, int ShowF
             + tr(L"Не удалось сформировать отчёт ❌", L"Failed to build report ❌") + L"\r\n";
     }
     sanitize_wstring_for_richedit(text);
-    log_line(L"ListLoadW: report chars=%u quickView=%d", (unsigned)text.size(), quickView ? 1 : 0);
+    log_line(L"ListLoadW: report chars=%u quickView=%d fitToWindow=%d", (unsigned)text.size(),
+        quickView ? 1 : 0, (ShowFlags & lcp_fittowindow) ? 1 : 0);
 
     bool wrapText = (ShowFlags & lcp_wraptext) != 0;
     DWORD reStyle = WS_CHILD | WS_VISIBLE | WS_TABSTOP | WS_VSCROLL |
