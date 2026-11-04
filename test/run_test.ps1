@@ -56,6 +56,43 @@ Write-Host "==> Building plugin (Release|x64)"
 & $tools.MSBuild (Join-Path $root "IsoLister.sln") /p:Configuration=Release /p:Platform=x64 /v:minimal /nologo
 if ($LASTEXITCODE -ne 0) { throw "MSBuild failed" }
 
+Write-Host "==> Building testhost"
+$hostExe = Join-Path $outDir "testhost.exe"
+$hostObj = Join-Path $outDir "testhost.obj"
+$testhostCpp = Join-Path $root "tools\testhost.cpp"
+cmd /c "call `"$($tools.Vcvars)`" >nul && cl /nologo /EHsc /O2 /Fo`"$hostObj`" /Fe`"$hostExe`" `"$testhostCpp`" user32.lib gdi32.lib /link /SUBSYSTEM:CONSOLE /ENTRY:wmainCRTStartup"
+if ($LASTEXITCODE -ne 0) { throw "testhost build failed" }
+
+# ShrinkBitmap (bit 2) must not select the compact report. Only a TTOTAL_CMD root does.
+$qvDir = Join-Path $outDir "qv"
+New-Item -ItemType Directory -Force -Path $qvDir | Out-Null
+$qvIni = Join-Path $qvDir "lsplugin.ini"
+Set-Content -LiteralPath $qvIni -Value "[IsoLister]`r`nDebugLog=1`r`n" -Encoding Ascii
+Set-Content -LiteralPath (Join-Path $qvDir "wincmd.ini") -Value "" -Encoding Ascii
+$wlx = Join-Path $root "x64\Release\IsoLister.wlx64"
+function Assert-QuickView([string]$label, [string]$switch, [string]$expected) {
+    $log = Join-Path $qvDir "IsoLister.log"
+    if (Test-Path -LiteralPath $log) { Remove-Item -Force -LiteralPath $log }
+    $prevTemp, $prevTmp = $env:TEMP, $env:TMP
+    $env:TEMP = $qvDir
+    $env:TMP = $qvDir
+    try {
+        & $hostExe $wlx $qvIni $switch --ini $qvIni --exit
+        if ($LASTEXITCODE -ne 0) { throw "testhost $label exited $LASTEXITCODE" }
+    } finally {
+        $env:TEMP = $prevTemp
+        $env:TMP = $prevTmp
+    }
+    if (-not (Test-Path -LiteralPath $log)) { throw "testhost $label wrote no log" }
+    $text = Get-Content -LiteralPath $log -Encoding Unicode -Raw
+    if ($text -notmatch [regex]::Escape($expected)) {
+        throw "testhost $label : expected '$expected'`n$text"
+    }
+    Write-Host "$label : $expected"
+}
+Assert-QuickView "fit" "--fit" "load_file: quickView=0 fitToWindow=1"
+Assert-QuickView "quick" "--quick" "load_file: quickView=1 fitToWindow=0"
+
 Write-Host "==> Building standalone test harness"
 $bat = Join-Path $PSScriptRoot "build_standalone.bat"
 if (-not (Test-Path $bat)) { throw "Missing $bat" }

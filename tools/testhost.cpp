@@ -1,5 +1,5 @@
 // Minimal Lister host for testing IsoLister.wlx/.wlx64 without Total Commander (box/Wine).
-// usage: testhost.exe plugin.wlx64 file [search-text] [--size WxH] [--dark] [--quick] [--ini lsplugin.ini] [--iface 212]
+// usage: testhost.exe plugin.wlx64 file [search-text] [--size WxH] [--dark] [--quick] [--fit] [--exit] [--ini lsplugin.ini] [--iface 212]
 //                    [--shot out.bmp] [--pgdn N] [--copy out.txt] [--back]
 #include <windows.h>
 #include <cstdio>
@@ -50,13 +50,15 @@ int wmain(int argc, wchar_t** argv) {
     fprintf(stderr, "exports: ListLoadW=%p ListSearchTextW=%p ListGetPreviewBitmapW=%p ListCloseWindow=%p\ndetect: %s\n", (void*)load, (void*)search, (void*)preview, (void*)close, ds);
     int ww = 1180, wh = 860;
     const wchar_t* find = nullptr; const wchar_t* prev = nullptr; const wchar_t* shot = nullptr; const wchar_t* copy = nullptr;
-    int flags = 0, pgdn = 0, iface = 0; bool back = false; const wchar_t* ini = nullptr;
+    int flags = 0, pgdn = 0, iface = 0; bool back = false, quit = false, quick = false; const wchar_t* ini = nullptr;
     PCommand command = (PCommand)(void*)GetProcAddress(dll, "ListSendCommand");
     for (int i = 3; i < argc; i++) {
         if (!wcscmp(argv[i], L"--preview") && i + 1 < argc) prev = argv[++i];
         else if (!wcscmp(argv[i], L"--size") && i + 1 < argc) { swscanf(argv[++i], L"%dx%d", &ww, &wh); }
         else if (!wcscmp(argv[i], L"--dark")) flags |= 128;
-        else if (!wcscmp(argv[i], L"--quick")) flags |= 2;
+        else if (!wcscmp(argv[i], L"--quick")) quick = true;
+        else if (!wcscmp(argv[i], L"--fit")) flags |= 2; // ShrinkBitmap bit, same window class as F3
+        else if (!wcscmp(argv[i], L"--exit")) quit = true;
         else if (!wcscmp(argv[i], L"--ini") && i + 1 < argc) ini = argv[++i];
         else if (!wcscmp(argv[i], L"--iface") && i + 1 < argc) iface = _wtoi(argv[++i]);
         else if (!wcscmp(argv[i], L"--back")) back = true;
@@ -77,8 +79,8 @@ int wmain(int argc, wchar_t** argv) {
         if (b) { save_bmp(b, prev); DeleteObject(b); }
         return b ? 0 : 1;
     }
-    // --quick stands in for Ctrl+Q: the real plugin treats only a TTOTAL_CMD root as Quick View.
-    const wchar_t* hostClass = (flags & 2) ? L"TTOTAL_CMD" : L"TestLister";
+    // --quick stands in for Ctrl+Q. The plugin treats only a TTOTAL_CMD root as Quick View.
+    const wchar_t* hostClass = quick ? L"TTOTAL_CMD" : L"TestLister";
     WNDCLASSW wc = {}; wc.lpfnWndProc = Proc; wc.hInstance = GetModuleHandleW(nullptr); wc.lpszClassName = hostClass;
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1); wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
     RegisterClassW(&wc);
@@ -89,6 +91,7 @@ int wmain(int argc, wchar_t** argv) {
     g_plugin = load ? load(main, argv[2], flags) : nullptr;
     fprintf(stderr, "ListLoadW -> %p in %lu ms\n", (void*)g_plugin, GetTickCount() - t0);
     if (!g_plugin) return 1;
+    if (quit) { if (close) close(g_plugin); return 0; }
     RECT rc; GetClientRect(main, &rc); MoveWindow(g_plugin, 0, 0, rc.right, rc.bottom, TRUE);
     if (find && search) { MSG m; while (PeekMessageW(&m, nullptr, 0, 0, PM_REMOVE)) { TranslateMessage(&m); DispatchMessageW(&m); }
         int r = search(g_plugin, (WCHAR*)find, 1); fprintf(stderr, "search '%ls' -> %d\n", find, r);

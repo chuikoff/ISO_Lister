@@ -732,68 +732,6 @@ static void scroll_to(View* v, int y) {
 }
 
 // ---- painting
-// One wrapped line: glyphs are [b, e), the next line starts at next (a break space is skipped).
-struct WLine { int b, e, next; };
-// Break the way DrawText does with DT_WORDBREAK|DT_EDITCONTROL, so a hit is a span, not the whole cell.
-static void wrap_lines(HDC dc, const wchar_t* s, int n, int width, std::vector<WLine>& out) {
-    int i = 0;
-    while (i < n && (int)out.size() <= n) {
-        if (s[i] == L'\r' || s[i] == L'\n') {
-            wchar_t c = s[i];
-            int next = i + 1;
-            if (next < n && (s[next] == L'\r' || s[next] == L'\n') && s[next] != c) next++;
-            out.push_back({ i, i, next });
-            i = next;
-            continue;
-        }
-        int seg = i;
-        while (seg < n && s[seg] != L'\r' && s[seg] != L'\n') seg++;
-        int remain = seg - i;
-        INT fit = 0;
-        SIZE sz = {};
-        if (width > 0) GetTextExtentExPointW(dc, s + i, remain, width, &fit, nullptr, &sz);
-        if (fit >= remain) {
-            int next = seg;
-            if (next < n && (s[next] == L'\r' || s[next] == L'\n')) {
-                wchar_t c = s[next];
-                next++;
-                if (next < n && (s[next] == L'\r' || s[next] == L'\n') && s[next] != c) next++;
-            }
-            out.push_back({ i, seg, next });
-            i = next;
-            continue;
-        }
-        int lastSp = -1;
-        int fitted = std::max(0, std::min(fit, remain));
-        for (int k = fitted - 1; k >= 0; k--) if (s[i + k] == L' ' || s[i + k] == L'\t') { lastSp = k; break; }
-        if (lastSp > 0) {
-            out.push_back({ i, i + lastSp, i + lastSp + 1 });
-            i += lastSp + 1;
-        } else {
-            int take = std::max(1, fitted > 0 ? fitted : 1);
-            if (take > remain) take = remain;
-            out.push_back({ i, i + take, i + take });
-            i += take;
-        }
-    }
-}
-static void add_find_rect(HDC dc, COLORREF color, HRGN clip, const RECT& bounds, RECT hr) {
-    if (hr.left < bounds.left) hr.left = bounds.left;
-    if (hr.right > bounds.right) hr.right = bounds.right;
-    if (hr.top < bounds.top) hr.top = bounds.top;
-    if (hr.bottom > bounds.bottom) hr.bottom = bounds.bottom;
-    if (hr.right <= hr.left || hr.bottom <= hr.top) return;
-    HBRUSH hb = CreateSolidBrush(color);
-    FillRect(dc, &hr, hb);
-    DeleteObject(hb);
-    if (!clip) return;
-    HRGN one = CreateRectRgnIndirect(&hr);
-    if (!one) return;
-    RECT box;
-    int kind = GetRgnBox(clip, &box);
-    CombineRgn(clip, kind == NULLREGION ? one : clip, one, kind == NULLREGION ? RGN_COPY : RGN_OR);
-    DeleteObject(one);
-}
 static void round_rect(HDC dc, const RECT& r, int rad, COLORREF fill, COLORREF border) {
     using namespace Gdiplus;
     Graphics g(dc);
@@ -854,7 +792,6 @@ static void paint(View* v, HDC out) {
             DrawTextW(dc, L"Ag", 2, &probe, DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
             int lh = std::max(1, (int)(probe.bottom - probe.top));
             bool single = (e.fmt & DT_SINGLELINE) || (r.bottom - r.top) <= lh;
-            HRGN clip = CreateRectRgn(0, 0, 0, 0);
             if (single) {
                 SIZE a = {}, b = {}, full = {};
                 GetTextExtentPoint32W(dc, e.s.c_str(), m0, &a);
@@ -864,43 +801,25 @@ static void paint(View* v, HDC out) {
                 if (e.fmt & DT_RIGHT) x0 = r.right - full.cx;
                 else if (e.fmt & DT_CENTER) x0 = r.left + (r.right - r.left - full.cx) / 2;
                 RECT hr = r;
-                hr.left = x0 + a.cx - 1; hr.right = x0 + a.cx + b.cx + 1;
-                hr.bottom = r.top + lh;
+                hr.left = x0 + (int)a.cx - 1; hr.right = std::min((int)r.right, x0 + (int)a.cx + (int)b.cx + 1);
+                hr.bottom = std::min((int)r.bottom, (int)r.top + lh);
                 if (e.fmt & DT_VCENTER) { hr.top = r.top + (r.bottom - r.top - lh) / 2; hr.bottom = hr.top + lh; }
-                add_find_rect(dc, p.find, clip, r, hr);
-            } else {
-                std::vector<WLine> lines;
-                wrap_lines(dc, e.s.c_str(), (int)e.s.size(), std::max(0, (int)(r.right - r.left)), lines);
-                int y = r.top;
-                for (const WLine& ln : lines) {
-                    if (y >= r.bottom) break;
-                    int a = std::max(ln.b, m0);
-                    int b = std::min(ln.e, m1);
-                    if (m0 < ln.next && m1 > ln.e) b = std::max(b, std::min(m1, ln.next));
-                    if (a < b) {
-                        SIZE pre = {}, hit = {};
-                        GetTextExtentPoint32W(dc, e.s.c_str() + ln.b, a - ln.b, &pre);
-                        GetTextExtentPoint32W(dc, e.s.c_str() + a, b - a, &hit);
-                        RECT hr = { r.left + pre.cx - 1, y, r.left + pre.cx + hit.cx + 1, y + lh };
-                        add_find_rect(dc, p.find, clip, r, hr);
-                    }
-                    y += lh;
-                }
-            }
-            SetTextColor(dc, tc);
-            DrawTextW(dc, e.s.c_str(), (int)e.s.size(), &r, e.fmt | DT_NOPREFIX);
-            if (clip) {
-                RECT box;
-                if (GetRgnBox(clip, &box) != NULLREGION) {
-                    SelectClipRgn(dc, clip);
+                if (hr.right > hr.left && hr.bottom > hr.top) {
+                    HBRUSH hb = CreateSolidBrush(p.find); FillRect(dc, &hr, hb); DeleteObject(hb);
+                    SetTextColor(dc, tc);
+                    DrawTextW(dc, e.s.c_str(), (int)e.s.size(), &r, e.fmt | DT_NOPREFIX);
+                    HRGN rg = CreateRectRgnIndirect(&hr); SelectClipRgn(dc, rg);
                     SetTextColor(dc, p.find_text);
                     DrawTextW(dc, e.s.c_str(), (int)e.s.size(), &r, e.fmt | DT_NOPREFIX);
-                    SelectClipRgn(dc, nullptr);
+                    SelectClipRgn(dc, nullptr); DeleteObject(rg);
+                    SetTextCharacterExtra(dc, 0); SelectObject(dc, of);
+                    continue;
                 }
-                DeleteObject(clip);
+            } else {
+                // DrawText breaks the lines. A second guess marks the wrong word.
+                HBRUSH hb = CreateSolidBrush(p.find); FillRect(dc, &r, hb); DeleteObject(hb);
+                tc = p.find_text;
             }
-            SetTextCharacterExtra(dc, 0); SelectObject(dc, of);
-            continue;
         }
         SetTextColor(dc, tc);
         DrawTextW(dc, e.s.c_str(), (int)e.s.size(), &r, e.fmt | DT_NOPREFIX);
