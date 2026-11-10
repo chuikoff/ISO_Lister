@@ -4,6 +4,8 @@
 #   make dist       dist_box/ISO_Lister_v<VERSION>.zip
 CXX32 = i686-w64-mingw32-g++
 CXX64 = x86_64-w64-mingw32-g++
+WINDRES32 ?= i686-w64-mingw32-windres
+WINDRES64 ?= x86_64-w64-mingw32-windres
 CXXFLAGS = -std=c++17 -O2 -Wall -Wno-unused-variable -Wno-unused-function -Wno-sign-compare \
            -DUNICODE -D_UNICODE -DWIN32_LEAN_AND_MEAN -DNOMINMAX -finput-charset=UTF-8
 LDFLAGS = -static -static-libgcc -static-libstdc++ -s
@@ -22,11 +24,17 @@ $(B):
 version_auto.h: FORCE
 	sh tools/gen_version.sh . >/dev/null
 
-$(B)/IsoLister.wlx: $(SRC) $(HDRS) | $(B)
-	$(CXX32) $(CXXFLAGS) -I. -shared -o $@ $(SRC) -Wl,--kill-at $(LDFLAGS) $(LIBS)
+$(B)/IsoLister32.res.o: IsoLister.rc version_auto.h | $(B)
+	$(WINDRES32) -I. -O coff -i IsoLister.rc -o $@
 
-$(B)/IsoLister.wlx64: $(SRC) $(HDRS) | $(B)
-	$(CXX64) $(CXXFLAGS) -I. -shared -o $@ $(SRC) $(LDFLAGS) $(LIBS)
+$(B)/IsoLister64.res.o: IsoLister.rc version_auto.h | $(B)
+	$(WINDRES64) -I. -O coff -i IsoLister.rc -o $@
+
+$(B)/IsoLister.wlx: $(SRC) $(HDRS) $(B)/IsoLister32.res.o | $(B)
+	$(CXX32) $(CXXFLAGS) -I. -shared -o $@ $(SRC) $(B)/IsoLister32.res.o -Wl,--kill-at $(LDFLAGS) $(LIBS)
+
+$(B)/IsoLister.wlx64: $(SRC) $(HDRS) $(B)/IsoLister64.res.o | $(B)
+	$(CXX64) $(CXXFLAGS) -I. -shared -o $@ $(SRC) $(B)/IsoLister64.res.o $(LDFLAGS) $(LIBS)
 
 # standalone report CLI (same as test/build_standalone.bat)
 $(B)/IsoListerTest.exe: IsoLister.cpp $(HDRS) | $(B)

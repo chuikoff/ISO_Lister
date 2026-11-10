@@ -119,6 +119,24 @@ static bool path_looks_russian_lang(const wchar_t* s) {
 static void detect_ui_language_from_ini(const wchar_t* iniPath) {
     if (!iniPath || !iniPath[0]) return;
     wchar_t buf[MAX_PATH]{};
+    // 1) Explicit plugin setting: [IsoLister] Language=RUS / ENG / AUTO
+    GetPrivateProfileStringW(L"IsoLister", L"Language", L"", buf, MAX_PATH, iniPath);
+    if (buf[0]) {
+        std::wstring s(buf);
+        for (auto& ch : s) ch = (wchar_t)towlower(ch);
+        if (s.find(L"auto") != std::wstring::npos) {
+            // fall through to Configuration
+        }
+        else if (path_looks_russian_lang(s.c_str())) {
+            g_uiRu = true;
+            return;
+        }
+        else {
+            g_uiRu = false;
+            return;
+        }
+    }
+    // 2) TC configuration
     GetPrivateProfileStringW(L"Configuration", L"LanguageIni", L"", buf, MAX_PATH, iniPath);
     if (!buf[0])
         GetPrivateProfileStringW(L"Configuration", L"LanguageDll", L"", buf, MAX_PATH, iniPath);
@@ -179,11 +197,22 @@ static bool sample_parent_luma(HWND parent, int& lumaOut) {
     return true;
 }
 
+static void resolve_wincmd_ini(wchar_t* out, size_t cch);
+static std::wstring resolve_plugin_ini();
+
 static void recompute_theme(const wchar_t* wincmdPath, HWND parentHint = nullptr) {
     int listerFg = -1, listerBg = -1;
     if (wincmdPath && wincmdPath[0]) {
         listerFg = GetPrivateProfileIntW(L"Lister", L"FgColor", -1, wincmdPath);
         listerBg = GetPrivateProfileIntW(L"Lister", L"BgColor", -1, wincmdPath);
+    }
+    wchar_t wincmdBuf[MAX_PATH]{};
+    resolve_wincmd_ini(wincmdBuf, MAX_PATH);
+    if (listerBg < 0 && wincmdBuf[0] && (!wincmdPath || _wcsicmp(wincmdBuf, wincmdPath) != 0)) {
+        listerBg = GetPrivateProfileIntW(L"Lister", L"BgColor", -1, wincmdBuf);
+    }
+    if (listerFg < 0 && wincmdBuf[0] && (!wincmdPath || _wcsicmp(wincmdBuf, wincmdPath) != 0)) {
+        listerFg = GetPrivateProfileIntW(L"Lister", L"FgColor", -1, wincmdBuf);
     }
 
     bool dark = false;
@@ -194,7 +223,7 @@ static void recompute_theme(const wchar_t* wincmdPath, HWND parentHint = nullptr
     else if (listerBg >= 0)
         dark = color_luma((COLORREF)listerBg) < 128;
     else
-        dark = detect_tc_dark_mode(wincmdPath);
+        dark = detect_tc_dark_mode(wincmdBuf[0] ? wincmdBuf : wincmdPath);
 
     int parentLuma = -1;
     if (g_optDark == 2 && sample_parent_luma(parentHint, parentLuma)) {
@@ -3563,6 +3592,34 @@ static void load_options_from_ini_file(const wchar_t* iniPath) {
     g_optCompactQuickView = (compactQv != 0) ? 1 : 0;
 }
 
+static std::wstring get_plugin_directory() {
+    HMODULE hMod = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            (LPCWSTR)&get_plugin_directory, &hMod) || !hMod) {
+        return L"";
+    }
+    wchar_t path[MAX_PATH]{};
+    DWORD len = GetModuleFileNameW(hMod, path, MAX_PATH);
+    if (len == 0 || len >= MAX_PATH) return L"";
+    wchar_t* slash = wcsrchr(path, L'\\');
+    if (!slash) slash = wcsrchr(path, L'/');
+    if (!slash) return L"";
+    *slash = L'\0';
+    return path;
+}
+
+static std::wstring resolve_plugin_ini() {
+    std::wstring dir = get_plugin_directory();
+    if (dir.empty()) return L"";
+    std::wstring cand1 = dir + L"\\ISO_Lister.ini";
+    if (GetFileAttributesW(cand1.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return cand1;
+    std::wstring cand2 = dir + L"\\IsoLister.ini";
+    if (GetFileAttributesW(cand2.c_str()) != INVALID_FILE_ATTRIBUTES)
+        return cand2;
+    return L"";
+}
+
 static void resolve_wincmd_ini(wchar_t* out, size_t cch) {
     out[0] = 0;
     if (!g_iniPath.empty()) {
@@ -3581,27 +3638,49 @@ static void resolve_wincmd_ini(wchar_t* out, size_t cch) {
     }
 }
 
-static void load_options_from_ini() {
-    g_uiRu = false;
-    if (!g_iniPath.empty())
-        load_options_from_ini_file(g_iniPath.c_str());
+static bool g_optionsLoaded = false;
 
+static void load_options_from_ini() {
+    g_optionsLoaded = true;
+    g_uiRu = false;
+
+    // 1) Base settings from TC's wincmd.ini
     wchar_t wincmd[MAX_PATH]{};
     resolve_wincmd_ini(wincmd, MAX_PATH);
-    if (wincmd[0] && (g_iniPath.empty() || _wcsicmp(wincmd, g_iniPath.c_str()) != 0))
+    if (wincmd[0])
         load_options_from_ini_file(wincmd);
 
+    // 2) TC DefaultIniName (e.g. lsplugin.ini)
+    if (!g_iniPath.empty() && (wincmd[0] == 0 || _wcsicmp(wincmd, g_iniPath.c_str()) != 0))
+        load_options_from_ini_file(g_iniPath.c_str());
+
+    // 3) Plugin-local INI in plugin folder (ISO_Lister.ini / IsoLister.ini)
+    std::wstring pluginIni = resolve_plugin_ini();
+    if (!pluginIni.empty())
+        load_options_from_ini_file(pluginIni.c_str());
+
+    // 4) UI language (wincmd -> g_iniPath -> pluginIni overrides)
     if (wincmd[0])
         detect_ui_language_from_ini(wincmd);
     if (!g_iniPath.empty())
         detect_ui_language_from_ini(g_iniPath.c_str());
+    if (!pluginIni.empty())
+        detect_ui_language_from_ini(pluginIni.c_str());
 
-    // Theme follows TC DarkMode (cm_SwitchDarkMode), not OS AppsUseLightTheme
-    recompute_theme(wincmd[0] ? wincmd : (g_iniPath.empty() ? nullptr : g_iniPath.c_str()));
+    // 5) Theme follows TC DarkMode / plugin-local ini
+    const wchar_t* themeIni = !pluginIni.empty() ? pluginIni.c_str() :
+                              (wincmd[0] ? wincmd : (g_iniPath.empty() ? nullptr : g_iniPath.c_str()));
+    recompute_theme(themeIni);
 
-    log_line(L"Options: ScanDepth=%d MaxNodes=%d ShowBootEntries=%d ShowFileList=%d MaxFileList=%d FullScan=%d Verbose=%d CompactQuickView=%d Dark=%d DebugLog=%d uiRu=%d darkMode=%d",
+    log_line(L"Options: pluginIni=%s g_iniPath=%s wincmd=%s ScanDepth=%d MaxNodes=%d ShowBootEntries=%d ShowFileList=%d MaxFileList=%d FullScan=%d Verbose=%d CompactQuickView=%d Dark=%d DebugLog=%d uiRu=%d darkMode=%d",
+        pluginIni.c_str(), g_iniPath.c_str(), wincmd,
         g_optDepth, g_optMaxNodes, g_optShowBootEntries, g_optShowFileList, g_optMaxFileList,
         g_optFullScan, g_optVerbose, g_optCompactQuickView, g_optDark, g_optDebugLog, g_uiRu ? 1 : 0, g_darkMode ? 1 : 0);
+}
+
+static void ensure_options_loaded() {
+    if (!g_optionsLoaded)
+        load_options_from_ini();
 }
 
 static std::wstring wim_flags_summary(uint32_t flags) {
@@ -4203,6 +4282,7 @@ static std::wstring generate_iso_report(const wchar_t* FileToLoad, bool compact)
 // -----------------------------------------------------------------------------
 std::wstring IsoAnalysis_BuildReport(const wchar_t* FileToLoad, bool compact)
 {
+    load_options_from_ini();
     std::wstring text;
     try {
         text = generate_iso_report(FileToLoad, compact);
@@ -4222,14 +4302,19 @@ void IsoAnalysis_SetIniPath(const wchar_t* iniPath)
     if (iniPath && iniPath[0]) {
         g_iniPath = iniPath;
         log_line(L"ListSetDefaultParams: INI=%s", g_iniPath.c_str());
-        load_options_from_ini();
     }
     else {
         log_line(L"ListSetDefaultParams: no INI passed");
     }
+    load_options_from_ini();
 }
 
-std::wstring IsoAnalysis_IniPath() { return g_iniPath; }
+std::wstring IsoAnalysis_IniPath() {
+    ensure_options_loaded();
+    std::wstring pluginIni = resolve_plugin_ini();
+    if (!pluginIni.empty()) return pluginIni;
+    return g_iniPath;
+}
 
 std::wstring IsoAnalysis_WincmdIni()
 {
@@ -4238,20 +4323,34 @@ std::wstring IsoAnalysis_WincmdIni()
     return wincmd;
 }
 
-bool IsoAnalysis_UiRussian() { return g_uiRu; }
+bool IsoAnalysis_UiRussian() {
+    ensure_options_loaded();
+    return g_uiRu;
+}
 
-const wchar_t* IsoAnalysis_Tr(const wchar_t* ru, const wchar_t* en) { return tr(ru, en); }
+const wchar_t* IsoAnalysis_Tr(const wchar_t* ru, const wchar_t* en) {
+    ensure_options_loaded();
+    return tr(ru, en);
+}
 
-int IsoAnalysis_DarkOption() { return g_optDark; }
+int IsoAnalysis_DarkOption() {
+    ensure_options_loaded();
+    return g_optDark;
+}
 
-int IsoAnalysis_CompactQuickView() { return g_optCompactQuickView; }
+int IsoAnalysis_CompactQuickView() {
+    ensure_options_loaded();
+    return g_optCompactQuickView;
+}
 
 bool IsoAnalysis_DetectDark(HWND parentHint)
 {
-    // Re-read TC DarkMode each open (user may toggle cm_SwitchDarkMode without reload)
+    load_options_from_ini();
     wchar_t wincmd[MAX_PATH]{};
     resolve_wincmd_ini(wincmd, MAX_PATH);
-    recompute_theme(wincmd[0] ? wincmd : nullptr, parentHint);
+    std::wstring pluginIni = resolve_plugin_ini();
+    const wchar_t* themeIni = !pluginIni.empty() ? pluginIni.c_str() : (wincmd[0] ? wincmd : nullptr);
+    recompute_theme(themeIni, parentHint);
     return g_darkMode;
 }
 

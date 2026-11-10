@@ -54,7 +54,7 @@ WLX Lister plugin for [Total Commander](https://www.ghisler.com/) — fast disk 
 
 ### Установка
 
-1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.2.1.zip`.
+1. Скачайте [последний релиз](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.2.2.zip`.
 2. Откройте архив в Total Commander — появится диалог автоустановки (`pluginst.inf`).
 3. Путь по умолчанию: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Полностью перезапустите Total Commander.**
@@ -93,7 +93,10 @@ EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | 
 
 ### Настройки
 
-Секция `[IsoLister]` в `%APPDATA%\GHISLER\lsplugin.ini` (или `wincmd.ini`):
+Файл настроек ищется в следующем порядке (приоритет сверху вниз):
+1. `ISO_Lister.ini` (или `IsoLister.ini`) прямо в папке плагина рядом с DLL (`%COMMANDER_PATH%\Plugins\ISO_Lister\ISO_Lister.ini`).
+2. Секция `[IsoLister]` в `%APPDATA%\GHISLER\lsplugin.ini`.
+3. Секция `[IsoLister]` в `wincmd.ini`:
 
 | Параметр | По умолчанию | Описание |
 |----------|--------------|----------|
@@ -106,8 +109,11 @@ EXT="ISO" | EXT="DMG" | (MULTIMEDIA & EXT="IMG" & [510]=85 & [511]=170) | ... | 
 | `MaxFileList` | `1000` | Макс. файлов в списке |
 | `CompactQuickView` | `1` | `1` — компактная сводка в быстром просмотре (Ctrl+Q); `0` — полный отчёт и там |
 | `DebugLog` | `0` (Release) / `1` (Debug) | `1` — писать диагностику в `%TEMP%\IsoLister.log` |
+| `Language` | `auto` | Язык отчёта: `auto` (по TC), `RUS`, `ENG` |
+| `Theme` | `auto` | Цветовая тема: `auto`, `light`, `dark` (приоритетнее `Dark`) |
+| `Dark` | `2` | `0` — светлая, `1` — тёмная, `2` — авто (по TC) |
 
-Язык UI: если в `wincmd.ini` `LanguageIni`/`LanguageDll` содержит **RUS** — русский отчёт; иначе **английский**.
+Язык UI: если задан параметр `Language=RUS` или `Language=ENG` в `[IsoLister]`, используется он. Иначе определяется по Total Commander: если в `wincmd.ini` `LanguageIni`/`LanguageDll` содержит **RUS** — русский отчёт; иначе **английский**.
 
 Тёмная тема (по порядку): `[IsoLister] Theme=auto|light|dark` → прежний `Dark=0|1` (`2` = авто) → флаг тёмного режима, который передаёт TC 11+ → для старых TC прежняя эвристика (`[Configuration] DarkMode`, `[Lister] BgColor`, яркость окна Lister). Тема Windows **не** используется — у TC свой переключатель `cm_SwitchDarkMode`.
 
@@ -196,7 +202,7 @@ Screenshots: see the Russian section above (`docs/windows.png`, `docs/linux.png`
 
 ### Installation
 
-1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.2.1.zip`.
+1. Download the [latest release](https://github.com/chuikoff/ISO_Lister/releases): `ISO_Lister_v1.2.2.zip`.
 2. Open the ZIP in Total Commander — auto-install dialog appears (`pluginst.inf`).
 3. Default path: `%COMMANDER_PATH%\Plugins\ISO_Lister\`.
 4. **Restart Total Commander completely.**
@@ -235,7 +241,10 @@ If `.img` does not open:
 
 ### Settings
 
-Section `[IsoLister]` in `%APPDATA%\GHISLER\lsplugin.ini` (or `wincmd.ini`):
+Settings are searched in the following order (top to bottom priority):
+1. `ISO_Lister.ini` (or `IsoLister.ini`) directly in the plugin directory next to the DLL (`%COMMANDER_PATH%\Plugins\ISO_Lister\ISO_Lister.ini`).
+2. Section `[IsoLister]` in `%APPDATA%\GHISLER\lsplugin.ini`.
+3. Section `[IsoLister]` in `wincmd.ini`:
 
 | Option | Default | Description |
 |--------|---------|-------------|
@@ -248,8 +257,11 @@ Section `[IsoLister]` in `%APPDATA%\GHISLER\lsplugin.ini` (or `wincmd.ini`):
 | `MaxFileList` | `1000` | Max files in list |
 | `CompactQuickView` | `1` | `1` — compact summary in Quick View (Ctrl+Q); `0` — full report there too |
 | `DebugLog` | `0` (Release) / `1` (Debug) | `1` — write diagnostics to `%TEMP%\IsoLister.log` |
+| `Language` | `auto` | UI language: `auto` (follow TC), `RUS`, `ENG` |
+| `Theme` | `auto` | Color theme: `auto`, `light`, `dark` (takes precedence over `Dark`) |
+| `Dark` | `2` | `0` — force light, `1` — force dark, `2` — auto (follow TC) |
 
-UI language: if `wincmd.ini` `LanguageIni`/`LanguageDll` contains **RUS** → Russian report; otherwise **English**.
+UI language: if `Language=RUS` or `Language=ENG` is set under `[IsoLister]`, it is used directly. Otherwise follows Total Commander: if `wincmd.ini` `LanguageIni`/`LanguageDll` contains **RUS** → Russian report; otherwise **English**.
 
 Dark theme (in order): `[IsoLister] Theme=auto|light|dark` → legacy `Dark=0|1` (`2` = auto) → the dark-mode flag TC 11+ passes to the plugin → for older TC the previous heuristic (`[Configuration] DarkMode`, `[Lister] BgColor`, Lister window brightness). The Windows theme is **not** used — TC has its own `cm_SwitchDarkMode`.
 
