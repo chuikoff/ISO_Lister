@@ -248,8 +248,15 @@ static ISize text_size(View* v, int font, const std::wstring& s, int width, UINT
     HDC dc = measure_dc();
     HGDIOBJ of = SelectObject(dc, v->fonts[font]);
     SetTextCharacterExtra(dc, extra);
-    RECT r = { 0, 0, width > 0 ? width : 100000, 0 };
     std::wstring t = s.empty() ? std::wstring(L" ") : s;
+    if ((fmt & DT_SINGLELINE) || width <= 0) {
+        SIZE sz = {};
+        GetTextExtentPoint32W(dc, t.c_str(), (int)t.size(), &sz);
+        SetTextCharacterExtra(dc, 0);
+        SelectObject(dc, of);
+        return ISize{ (int)sz.cx, (int)sz.cy };
+    }
+    RECT r = { 0, 0, width > 0 ? width : 100000, 0 };
     DrawTextW(dc, t.c_str(), (int)t.size(), &r, fmt | DT_CALCRECT | DT_NOPREFIX);
     SetTextCharacterExtra(dc, 0);
     SelectObject(dc, of);
@@ -339,14 +346,15 @@ static int build_table(View* v, Block& bk, size_t a, size_t b, int w, int y) {
             int f = it.header ? F_TL : (!s.empty() && s[0] == L'/') ? F_MONO : F_ROW;
             int ex = it.header ? std::max(1, v->S10(5)) : 0;
             if (it.header) s = upper(s);
-            ISize ts = text_size(v, f, s, cw[c], kWrap, ex);
+            UINT fmt = it.header ? kOne : kWrap;
+            ISize ts = text_size(v, f, s, cw[c], fmt, ex);
             int ty = y + pad + (f == F_MONO ? (line_h(v, F_ROW) - line_h(v, F_MONO) + 1) / 2 : 0);
             if (it.header) ty = y + pad + (line_h(v, F_ROW) - line_h(v, F_TL)) / 2;
             if (!s.empty())
             {
                 int tg = c < it.cellTags.size() ? it.cellTags[c] : IsoTagNone;
                 COLORREF col = it.header ? p.muted : (tg == IsoTagOk || tg == IsoTagBad || tg == IsoTagWarn) ? p.tag[tg] : p.text;
-                bk.els.push_back(text_el(f, s, RECT{ x, ty, x + cw[c], ty + ts.cy }, col, kWrap, row, true, ex));
+                bk.els.push_back(text_el(f, s, RECT{ x, ty, x + cw[c], ty + ts.cy }, col, fmt, row, true, ex));
             }
             hmax = std::max(hmax, (ty - y) + ts.cy);
             x += cw[c] + gap;
