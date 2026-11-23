@@ -809,9 +809,15 @@ static void paint(View* v, HDC out) {
                 if (e.fmt & DT_RIGHT) x0 = r.right - full.cx;
                 else if (e.fmt & DT_CENTER) x0 = r.left + (r.right - r.left - full.cx) / 2;
                 RECT hr = r;
-                hr.left = x0 + (int)a.cx - 1; hr.right = std::min((int)r.right, x0 + (int)a.cx + (int)b.cx + 1);
-                hr.bottom = std::min((int)r.bottom, (int)r.top + lh);
+                hr.left = x0 + (int)a.cx - 1;
+                hr.right = x0 + (int)a.cx + (int)b.cx + 1;
+                hr.bottom = (int)r.top + lh;
                 if (e.fmt & DT_VCENTER) { hr.top = r.top + (r.bottom - r.top - lh) / 2; hr.bottom = hr.top + lh; }
+                // Full-string width for DT_RIGHT/DT_CENTER can start outside the cell.
+                if (hr.left < r.left) hr.left = r.left;
+                if (hr.right > r.right) hr.right = r.right;
+                if (hr.top < r.top) hr.top = r.top;
+                if (hr.bottom > r.bottom) hr.bottom = r.bottom;
                 if (hr.right > hr.left && hr.bottom > hr.top) {
                     HBRUSH hb = CreateSolidBrush(p.find); FillRect(dc, &hr, hb); DeleteObject(hb);
                     SetTextColor(dc, tc);
